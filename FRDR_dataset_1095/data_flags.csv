@@ -1,0 +1,10 @@
+﻿Flag,Definition
+M,"Indicates data is missing, sensor was removed during deployment due to damage or failure or values were not recorded or logged due to internal errors"
+C,Indicates data that was deemed faulty or unrealistic as described in Baulch et al. (2025).
+A2,Photosynthetically active radiation (PAR) measurement below factory range (2 - 2000 µmol photons/m²/s) during periods of low light. Value adjusted to 0.
+A3,"Inverted PAR readings may represent environmental conditions such as algae blooms, sediment plumes, localized obstructions, shadows from boats, differential sensor fouling, or measurement error"
+A4,"In 2015, underwater PAR sensors were positioned on either side of the buoy with intermittent shading occurring across the study season. We recommend using the highest value of the two sensors, but not using them in a comparative way to understand light attenuation between the two sensor depths due to shading effects associated with sensor orientation in this year."
+A5,"Daily rainfall measurement indicates a sudden, localized rainfall event undetected by nearby Moose Jaw CS Saskatchewan weather station (https://climate.weather.gc.ca/historical_data/search_historic_data_e.html)"
+A6,"Corrected Specific Conductivity measurements in response to issues surrounding calibration solutions, i) shallow (0.8 m) and deep (2.8 m) sensors during 2017 AND ii) deep (2.8 m) sensors during 2018."
+B6,"Raw Specific Conductivity measured show step-wise changes in response to issues surrounding calibration solutions, i) shallow (0.8 m) and deep (2.8 m) sensors during 2017 AND ii) deep (2.8 m) sensors during 2018."
+B7,Chlorophyll and/or phycocyanin and/or Turbidity measurements showed a spike in concentration combined with a noticeable decrease following site visit.
