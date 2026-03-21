@@ -1,28 +1,53 @@
 import pandas as pd
+import numpy as np
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def preprocess_2014_data():
-    # Load the 2014 data
-    data_path = "FRDR_dataset_1095/BPBuoyData_2014_Cleaned.csv"
-    df = pd.read_csv(data_path, parse_dates=["DateTime"])
-    
-    # Based on the visualizations, which highlight flagged periods,
-    # we preprocess by removing rows where the ChlRFUShallow_RFU_Flag is not NaN
-    # and also remove rows where ChlRFUShallow_RFU is NaN
-    
-    # Remove rows with NaN in ChlRFUShallow_RFU
-    df_clean = df.dropna(subset=['ChlRFUShallow_RFU'])
-    
-    # Remove rows where flag is present (indicating problematic data)
-    df_clean = df_clean[df_clean['ChlRFUShallow_RFU_Flag'].isna()]
-    
-    # Save the cleaned data
-    output_path = "FRDR_dataset_1095/BPBuoyData_2014_Preprocessed.csv"
-    df_clean.to_csv(output_path, index=False)
+def preprocess_2014_data(input_path: str = "FRDR_dataset_1095/BPBuoyData_2014_Cleaned.csv",
+                         output_path: str = "FRDR_dataset_1095/BPBuoyData_2014_Preprocessed.csv",
+                         flag_value: str = "B7") -> int:
+    """Remove biofouling-affected chlorophyll measurements from the 2014 dataset.
+
+    Rows whose ``ChlRFUShallow_RFU_Flag`` equals *flag_value* (default ``'B7'``)
+    have their ``ChlRFUShallow_RFU`` value replaced with ``NaN``.  All other
+    columns and rows are preserved unchanged.
+
+    Parameters
+    ----------
+    input_path : str
+        Path to the raw/cleaned 2014 CSV file.
+    output_path : str
+        Destination path for the preprocessed CSV file.
+    flag_value : str
+        Quality-flag code that identifies biofouling periods (default ``'B7'``).
+
+    Returns
+    -------
+    int
+        Number of rows whose chlorophyll value was set to ``NaN``.
+    """
+    df = pd.read_csv(input_path, parse_dates=["DateTime"])
+
+    # Identify rows flagged with the biofouling quality flag
+    b7_mask = df["ChlRFUShallow_RFU_Flag"] == flag_value
+    affected_count = int(b7_mask.sum())
+
+    if affected_count > 0:
+        # Replace only the chlorophyll measurement; keep all other columns intact
+        df.loc[b7_mask, "ChlRFUShallow_RFU"] = np.nan
+
+        affected_rows = df.loc[b7_mask, "DateTime"]
+        print(f"Flag '{flag_value}' detected in {affected_count} rows.")
+        print(f"  Affected period: {affected_rows.min()} → {affected_rows.max()}")
+    else:
+        print(f"No rows with flag '{flag_value}' found.")
+
+    df.to_csv(output_path, index=False)
     print(f"Preprocessed data saved to {output_path}")
-    print(f"Original rows: {len(df)}, Cleaned rows: {len(df_clean)}")
+    print(f"Total rows: {len(df)}, rows with chlorophyll set to NaN: {affected_count}")
+
+    return affected_count
 
 def plot_preprocessed_2014():
     # Load the preprocessed 2014 data
