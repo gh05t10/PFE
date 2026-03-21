@@ -1,84 +1,103 @@
 """
 remove_biofouling_b7.py
 -----------------------
-Reads BPBuoyData_2014_Cleaned.csv, finds all rows where the chlorophyll
-quality flag is 'B7' (biofouling), replaces the corresponding chlorophyll
-values with NaN, and saves the result as BPBuoyData_2014_B7Removed.csv.
+Read the 2014 buoy CSV, replace every ChlRFUShallow_RFU value whose
+quality flag is 'B7' (biofouling) with NaN, and save the result.
 
-Also writes a plain-text summary to reports/B7_removal_report.txt.
+Output: FRDR_dataset_1095/BPBuoyData_2014_B7Removed.csv
+Report: reports/B7_removal_report.txt
 """
 
 import os
 import pandas as pd
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "FRDR_dataset_1095")
-REPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")
-
+DATA_DIR = "FRDR_dataset_1095"
 INPUT_FILE = os.path.join(DATA_DIR, "BPBuoyData_2014_Cleaned.csv")
 OUTPUT_FILE = os.path.join(DATA_DIR, "BPBuoyData_2014_B7Removed.csv")
-REPORT_FILE = os.path.join(REPORT_DIR, "B7_removal_report.txt")
+REPORT_FILE = os.path.join("reports", "B7_removal_report.txt")
 
-CHLOROPHYLL_COL = "ChlRFUShallow_RFU"
-FLAG_COL = "ChlRFUShallow_RFU_Flag"
-B7_FLAG = "B7"
+CHLRFU_COL = "ChlRFUShallow_RFU"
+CHLRFU_FLAG_COL = "ChlRFUShallow_RFU_Flag"
 
 
-def remove_b7_biofouling(input_path: str = INPUT_FILE,
-                          output_path: str = OUTPUT_FILE,
-                          report_path: str = REPORT_FILE) -> pd.DataFrame:
+def remove_b7_flags(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Replace ChlRFUShallow_RFU values flagged as 'B7' with NaN.
+
+    Returns the modified DataFrame and a summary statistics dict.
     """
-    Load the 2014 CSV, replace B7-flagged chlorophyll values with NaN,
-    and save the cleaned dataset.
+    df = df.copy()
 
-    Returns the cleaned DataFrame.
-    """
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    b7_mask = df[CHLRFU_FLAG_COL] == "B7"
+    b7_rows = int(b7_mask.sum())
 
-    df = pd.read_csv(input_path, parse_dates=["DateTime"])
+    b7_subset = df.loc[b7_mask, CHLRFU_COL]
+    stats = {
+        "total_rows": len(df),
+        "b7_rows": b7_rows,
+        "b7_pct": round(b7_rows / len(df) * 100, 2),
+        "b7_start": str(df.loc[b7_mask, "DateTime"].min()) if b7_rows else "N/A",
+        "b7_end": str(df.loc[b7_mask, "DateTime"].max()) if b7_rows else "N/A",
+        "chl_mean_before": round(df[CHLRFU_COL].mean(), 4),
+        "chl_min_before": round(df[CHLRFU_COL].min(), 4),
+        "chl_max_before": round(df[CHLRFU_COL].max(), 4),
+        "b7_chl_mean": round(b7_subset.mean(), 4) if b7_rows else "N/A",
+        "b7_chl_min": round(b7_subset.min(), 4) if b7_rows else "N/A",
+        "b7_chl_max": round(b7_subset.max(), 4) if b7_rows else "N/A",
+    }
 
-    b7_mask = df[FLAG_COL] == B7_FLAG
-    n_b7 = b7_mask.sum()
-    b7_dates = df.loc[b7_mask, "DateTime"]
+    # Replace B7 chlorophyll values with NaN
+    df.loc[b7_mask, CHLRFU_COL] = float("nan")
 
-    original_values = df.loc[b7_mask, CHLOROPHYLL_COL].copy()
+    stats["nan_after"] = int(df[CHLRFU_COL].isna().sum())
+    stats["chl_mean_after"] = round(df[CHLRFU_COL].mean(), 4)
 
-    df.loc[b7_mask, CHLOROPHYLL_COL] = float("nan")
+    return df, stats
 
-    df.to_csv(output_path, index=False)
 
-    report_lines = [
-        "=" * 60,
-        "B7 Biofouling Removal Report",
-        "=" * 60,
-        f"Input file  : {input_path}",
-        f"Output file : {output_path}",
-        "",
-        f"Total rows in dataset        : {len(df)}",
-        f"Rows with B7 flag            : {n_b7}",
-        f"B7 period start              : {b7_dates.min()}",
-        f"B7 period end                : {b7_dates.max()}",
-        "",
-        "Statistics of removed values:",
-        f"  Mean   : {original_values.mean():.4f} RFU",
-        f"  Std    : {original_values.std():.4f} RFU",
-        f"  Min    : {original_values.min():.4f} RFU",
-        f"  Max    : {original_values.max():.4f} RFU",
-        "",
-        "Normal chlorophyll range: 2-3 RFU",
-        "Action: All B7-flagged chlorophyll values replaced with NaN.",
-        "=" * 60,
-    ]
-    report_text = "\n".join(report_lines)
-    with open(report_path, "w") as fh:
-        fh.write(report_text)
+def write_report(stats: dict, path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("B7 Biofouling Removal Report\n")
+        fh.write("=" * 40 + "\n\n")
+        fh.write(f"Input file      : {INPUT_FILE}\n")
+        fh.write(f"Output file     : {OUTPUT_FILE}\n\n")
+        fh.write("Dataset overview\n")
+        fh.write("-" * 40 + "\n")
+        fh.write(f"  Total rows              : {stats['total_rows']}\n")
+        fh.write(f"  B7-flagged rows         : {stats['b7_rows']} ({stats['b7_pct']}%)\n")
+        fh.write(f"  B7 period (start)       : {stats['b7_start']}\n")
+        fh.write(f"  B7 period (end)         : {stats['b7_end']}\n\n")
+        fh.write("ChlRFUShallow_RFU statistics\n")
+        fh.write("-" * 40 + "\n")
+        fh.write(f"  Mean  (before removal)  : {stats['chl_mean_before']}\n")
+        fh.write(f"  Min   (before removal)  : {stats['chl_min_before']}\n")
+        fh.write(f"  Max   (before removal)  : {stats['chl_max_before']}\n")
+        fh.write(f"  Mean  (B7 values only)  : {stats['b7_chl_mean']}\n")
+        fh.write(f"  Min   (B7 values only)  : {stats['b7_chl_min']}\n")
+        fh.write(f"  Max   (B7 values only)  : {stats['b7_chl_max']}\n")
+        fh.write(f"  NaN count (after)       : {stats['nan_after']}\n")
+        fh.write(f"  Mean  (after removal)   : {stats['chl_mean_after']}\n\n")
+        fh.write("Result: B7 values replaced with NaN.\n")
+        fh.write("        Flag column preserved for reference.\n")
 
-    print(report_text)
-    print(f"\nCleaned file saved to: {output_path}")
-    print(f"Report saved to: {report_path}")
 
-    return df
+def main():
+    print(f"Reading {INPUT_FILE} ...")
+    df = pd.read_csv(INPUT_FILE, parse_dates=["DateTime"])
+
+    df_clean, stats = remove_b7_flags(df)
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    df_clean.to_csv(OUTPUT_FILE, index=False)
+    print(f"Saved cleaned data  -> {OUTPUT_FILE}")
+
+    write_report(stats, REPORT_FILE)
+    print(f"Saved removal report -> {REPORT_FILE}")
+
+    print(f"\nSummary: {stats['b7_rows']} B7-flagged rows ({stats['b7_pct']}%) "
+          f"from {stats['b7_start']} to {stats['b7_end']}")
+    print(f"ChlRFUShallow_RFU mean: {stats['chl_mean_before']} -> {stats['chl_mean_after']}")
 
 
 if __name__ == "__main__":
-    remove_b7_biofouling()
+    main()

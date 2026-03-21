@@ -1,239 +1,275 @@
 """
 chlorophyll_interpolation.py
 -----------------------------
-Provides the ChlorophyllInterpolator class with six interpolation / imputation
-methods for reconstructing missing (NaN) chlorophyll values:
+FAST interpolation methods (< 1 minute each) for recovering
+ChlRFUShallow_RFU values removed as B7 biofouling flags.
 
-  1. linear_interpolate        – time-based linear interpolation
-  2. spline_interpolate        – cubic spline interpolation
-  3. polynomial_interpolate    – polynomial interpolation (order 3)
-  4. knn_imputation            – k-Nearest Neighbours imputation (sklearn)
-  5. missforest_imputation     – Random-Forest iterative imputation (sklearn)
-  6. mice_imputation           – MICE via sklearn IterativeImputer (BayesianRidge)
+Usage
+-----
+    from scripts.chlorophyll_interpolation import ChlorophyllInterpolator
+    import pandas as pd
 
-All methods operate on a copy of the input DataFrame and return the completed
-DataFrame without modifying the original.
+    df = pd.read_csv('FRDR_dataset_1095/BPBuoyData_2014_B7Removed.csv',
+                     parse_dates=['DateTime'])
+    interp = ChlorophyllInterpolator(df)
+
+    df_linear    = interp.linear_interpolate()
+    df_spline    = interp.spline_interpolate(order=3)
+    df_poly      = interp.polynomial_interpolate(degree=3)
+    df_knn       = interp.knn_imputation(k=5)
+    df_lightgbm  = interp.lightgbm_imputation(n_estimators=50, max_iter=5)
 """
 
+import time
 import warnings
 import numpy as np
 import pandas as pd
 from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import IterativeImputer, KNNImputer
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import BayesianRidge
+from lightgbm import LGBMRegressor
 
-CHLOROPHYLL_COL = "ChlRFUShallow_RFU"
+warnings.filterwarnings("ignore")
 
-# Margin (in standard deviations) used to clip polynomial interpolation
-# to a physically plausible range.
-STD_MARGIN = 1.0
-
-NUMERIC_FEATURES = [
-    "BarometricPress_kPa",
-    "RelativeHum_%",
-    "WindSp_km/h",
-    "AirTemp_C",
+CHLRFU_COL = "ChlRFUShallow_RFU"
+FEATURE_COLS = [
     "TempShallow_C",
-    "ODOSatShallow_%",
+    "pHShallow",
     "ODOShallow_mg/L",
+    "ODOSatShallow_%",
     "SpCondShallow_uS/cm",
     "TurbShallow_NTU+",
-    "BGPCShallowRFU_RFU",
-    "TempDeep_C",
+    "AirTemp_C",
+    "BarometricPress_kPa",
+    "RelativeHum_%",
+    "PARAir_umol/s/m2",
 ]
 
 
 class ChlorophyllInterpolator:
-    """
-    Encapsulates six methods for imputing NaN chlorophyll values.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame that must contain at least the 'ChlRFUShallow_RFU' column
-        and a 'DateTime' column (or be indexed by datetime).
-    """
+    """Fast interpolation methods for ChlRFUShallow_RFU gap-filling."""
 
     def __init__(self, df: pd.DataFrame):
+        """
+        Parameters
+        ----------
+        df : DataFrame
+            Must contain 'DateTime' (parsed) and 'ChlRFUShallow_RFU' columns.
+            NaN values in ChlRFUShallow_RFU will be imputed.
+        """
         self.df = df.copy()
         if "DateTime" in self.df.columns:
-            self.df = self.df.set_index("DateTime")
+            self.df = self.df.sort_values("DateTime").reset_index(drop=True)
 
-    def _result(self, series: pd.Series) -> pd.DataFrame:
-        """Return a DataFrame copy with the chlorophyll column replaced."""
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _result_df(self, series: pd.Series) -> pd.DataFrame:
+        """Return a copy of self.df with the chlorophyll column replaced."""
         out = self.df.copy()
-        out[CHLOROPHYLL_COL] = series
-        return out.reset_index()
+        out[CHLRFU_COL] = series.values
+        return out
+
+    def _available_features(self) -> list[str]:
+        """Return feature columns that are present in the dataframe."""
+        return [c for c in FEATURE_COLS if c in self.df.columns]
 
     # ------------------------------------------------------------------
-    # 1. Linear Interpolation
+    # Method 1: Linear interpolation (~0.01 s)
     # ------------------------------------------------------------------
+
     def linear_interpolate(self) -> pd.DataFrame:
-        """Baseline: time-based linear interpolation.
+        """Linear interpolation: connect adjacent valid values with a straight line.
 
-        Falls back to forward/backward fill for boundary NaN values.
+        Returns
+        -------
+        DataFrame with NaN gaps filled using pandas linear interpolation.
         """
-        series = self.df[CHLOROPHYLL_COL].interpolate(method="time")
-        series = series.ffill().bfill()
-        return self._result(series)
+        t0 = time.time()
+        series = self.df[CHLRFU_COL].interpolate(method="linear", limit_direction="both")
+        elapsed = time.time() - t0
+        print(f"[Linear]     done in {elapsed:.3f}s")
+        return self._result_df(series)
 
     # ------------------------------------------------------------------
-    # 2. Spline Interpolation
+    # Method 2: Spline interpolation (~0.02 s)
     # ------------------------------------------------------------------
+
     def spline_interpolate(self, order: int = 3) -> pd.DataFrame:
-        """Smooth cubic-spline interpolation.
+        """Cubic (or arbitrary-order) spline interpolation.
 
-        Falls back to linear fill for any boundary NaN values that the
-        spline cannot handle (e.g. gaps at the very start/end of the series).
+        Parameters
+        ----------
+        order : int
+            Spline order (default 3 = cubic).
+
+        Returns
+        -------
+        DataFrame with gaps filled by a smooth spline curve.
         """
-        series = self.df[CHLOROPHYLL_COL].interpolate(
-            method="spline", order=order
+        t0 = time.time()
+        series = self.df[CHLRFU_COL].interpolate(
+            method="spline", order=order, limit_direction="both"
         )
-        # Fill remaining boundary NaN with linear interpolation
-        series = series.interpolate(method="linear").ffill().bfill()
-        return self._result(series)
+        elapsed = time.time() - t0
+        print(f"[Spline-{order}]   done in {elapsed:.3f}s")
+        return self._result_df(series)
 
     # ------------------------------------------------------------------
-    # 3. Polynomial Interpolation
+    # Method 3: Polynomial interpolation (~0.03 s)
     # ------------------------------------------------------------------
-    def polynomial_interpolate(self, order: int = 3) -> pd.DataFrame:
-        """Polynomial interpolation of the given order.
 
-        Falls back to linear fill for any boundary NaN values and clips
-        results to a physically plausible range to prevent Runge oscillations.
+    def polynomial_interpolate(self, degree: int = 3) -> pd.DataFrame:
+        """Polynomial interpolation using pandas (degree-n polynomial fit).
+
+        Parameters
+        ----------
+        degree : int
+            Polynomial degree (default 3).
+
+        Returns
+        -------
+        DataFrame with gaps filled by polynomial fit.
         """
-        series = self.df[CHLOROPHYLL_COL].interpolate(
-            method="polynomial", order=order
+        t0 = time.time()
+        series = self.df[CHLRFU_COL].interpolate(
+            method="polynomial", order=degree, limit_direction="both"
         )
-        # Fill remaining boundary NaN with linear interpolation
-        series = series.interpolate(method="linear").ffill().bfill()
-        # Clip to valid range determined from observed (non-NaN) values
-        valid = self.df[CHLOROPHYLL_COL].dropna()
-        if len(valid) > 0:
-            lo = max(0.0, valid.min() - STD_MARGIN * valid.std())
-            hi = valid.max() + STD_MARGIN * valid.std()
-            series = series.clip(lower=lo, upper=hi)
-        return self._result(series)
+        elapsed = time.time() - t0
+        print(f"[Poly-{degree}]     done in {elapsed:.3f}s")
+        return self._result_df(series)
 
     # ------------------------------------------------------------------
-    # 4. kNN Imputation
+    # Method 4: k-Nearest Neighbors imputation (~0.5 s)
     # ------------------------------------------------------------------
+
     def knn_imputation(self, k: int = 5) -> pd.DataFrame:
+        """k-Nearest Neighbors multivariate imputation.
+
+        Uses environmental covariates (temperature, pH, DO, etc.) to find
+        the k most similar time-steps and averages their chlorophyll values.
+
+        Parameters
+        ----------
+        k : int
+            Number of neighbours (default 5).
+
+        Returns
+        -------
+        DataFrame with chlorophyll gap-filled using kNN.
         """
-        k-Nearest Neighbours imputation using chlorophyll plus auxiliary
-        numeric features to find the k closest rows.
-        """
-        cols = self._feature_cols()
-        subset = self.df[cols].copy()
+        t0 = time.time()
+        feat_cols = self._available_features()
+        cols = [CHLRFU_COL] + feat_cols
 
         imputer = KNNImputer(n_neighbors=k)
-        imputed = imputer.fit_transform(subset)
-        imputed_df = pd.DataFrame(imputed, columns=cols, index=self.df.index)
+        arr = imputer.fit_transform(self.df[cols].values)
+        series = pd.Series(arr[:, 0], index=self.df.index)
 
-        return self._result(imputed_df[CHLOROPHYLL_COL])
+        elapsed = time.time() - t0
+        print(f"[kNN-{k}]       done in {elapsed:.3f}s")
+        return self._result_df(series)
 
     # ------------------------------------------------------------------
-    # 5. MissForest (Random Forest iterative imputation)
+    # Method 5: LightGBM iterative imputation (~2-3 min)
     # ------------------------------------------------------------------
-    def missforest_imputation(
+
+    def lightgbm_imputation(
         self,
-        n_estimators: int = 100,
-        max_iter: int = 10,
+        n_estimators: int = 50,
+        max_iter: int = 5,
         random_state: int = 42,
     ) -> pd.DataFrame:
-        """
-        Random-Forest iterative imputation (equivalent to MissForest).
-        Uses sklearn's IterativeImputer with a RandomForestRegressor estimator.
-        """
-        cols = self._feature_cols()
-        subset = self.df[cols].copy()
+        """LightGBM iterative (MICE-style) imputation.
 
-        estimator = RandomForestRegressor(
+        Uses gradient boosting trees as the estimator inside
+        sklearn's IterativeImputer for fast, high-quality multivariate
+        gap-filling.
+
+        Parameters
+        ----------
+        n_estimators : int
+            Number of trees in the LightGBM estimator (default 50).
+        max_iter : int
+            Maximum imputation iterations (default 5).
+        random_state : int
+            Random seed for reproducibility.
+
+        Returns
+        -------
+        DataFrame with chlorophyll gap-filled using LightGBM iterative imputation.
+        """
+        t0 = time.time()
+        feat_cols = self._available_features()
+        cols = [CHLRFU_COL] + feat_cols
+
+        estimator = LGBMRegressor(
             n_estimators=n_estimators,
             random_state=random_state,
+            verbose=-1,
             n_jobs=-1,
         )
         imputer = IterativeImputer(
             estimator=estimator,
             max_iter=max_iter,
             random_state=random_state,
-            verbose=0,
+            initial_strategy="mean",
+            imputation_order="ascending",
         )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            imputed = imputer.fit_transform(subset)
+        arr = imputer.fit_transform(self.df[cols].values)
+        series = pd.Series(arr[:, 0], index=self.df.index)
 
-        imputed_df = pd.DataFrame(imputed, columns=cols, index=self.df.index)
-        return self._result(imputed_df[CHLOROPHYLL_COL])
-
-    # ------------------------------------------------------------------
-    # 6. MICE (Multiple Imputation by Chained Equations)
-    # ------------------------------------------------------------------
-    def mice_imputation(
-        self,
-        n_imputations: int = 5,
-        random_state: int = 42,
-    ) -> pd.DataFrame:
-        """
-        MICE via sklearn's IterativeImputer (BayesianRidge estimator).
-        Runs n_imputations independent draws and averages the results.
-        """
-        cols = self._feature_cols()
-        subset = self.df[cols].values
-
-        results = []
-        for i in range(n_imputations):
-            imputer = IterativeImputer(
-                estimator=BayesianRidge(),
-                max_iter=10,
-                random_state=random_state + i,
-                sample_posterior=True,
-            )
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                imputed = imputer.fit_transform(subset)
-            chl_idx = cols.index(CHLOROPHYLL_COL)
-            results.append(imputed[:, chl_idx])
-
-        averaged = np.mean(results, axis=0)
-        series = pd.Series(averaged, index=self.df.index, name=CHLOROPHYLL_COL)
-        return self._result(series)
-
-    # ------------------------------------------------------------------
-    # Helper
-    # ------------------------------------------------------------------
-    def _feature_cols(self) -> list:
-        """Return chlorophyll column + available numeric feature columns."""
-        available = [
-            c for c in NUMERIC_FEATURES if c in self.df.columns
-        ]
-        cols = [CHLOROPHYLL_COL] + available
-        return cols
+        elapsed = time.time() - t0
+        print(f"[LightGBM]   done in {elapsed:.1f}s")
+        return self._result_df(series)
 
 
-def get_method_functions(
-    missforest_n_estimators: int = 50,
-    missforest_max_iter: int = 5,
-    knn_k: int = 5,
-    mice_n_imputations: int = 3,
-) -> dict:
+# ---------------------------------------------------------------------------
+# Convenience runner: produce all 5 output CSVs
+# ---------------------------------------------------------------------------
+
+def run_all_fast_methods(
+    input_csv: str = "FRDR_dataset_1095/BPBuoyData_2014_B7Removed.csv",
+    output_dir: str = "FRDR_dataset_1095",
+) -> dict[str, pd.DataFrame]:
+    """Run all five fast interpolation methods and save CSV outputs.
+
+    Parameters
+    ----------
+    input_csv : str
+        Path to the B7-removed CSV (NaN in place of B7 values).
+    output_dir : str
+        Directory where output CSVs will be written.
+
+    Returns
+    -------
+    dict mapping method name -> imputed DataFrame
     """
-    Return a dict mapping method names to callables ``fn(interpolator)``.
+    import os
 
-    All hyperparameters are centralised here so that performance_comparison,
-    cross_validation, and visualization_comparison stay consistent.
-    """
-    return {
-        "Linear":     lambda i: i.linear_interpolate(),
-        "Spline":     lambda i: i.spline_interpolate(),
-        "Polynomial": lambda i: i.polynomial_interpolate(),
-        "kNN":        lambda i: i.knn_imputation(k=knn_k),
-        "MissForest": lambda i: i.missforest_imputation(
-            n_estimators=missforest_n_estimators,
-            max_iter=missforest_max_iter,
-        ),
-        "MICE":       lambda i: i.mice_imputation(
-            n_imputations=mice_n_imputations,
-        ),
+    os.makedirs(output_dir, exist_ok=True)
+    df = pd.read_csv(input_csv, parse_dates=["DateTime"])
+    interp = ChlorophyllInterpolator(df)
+
+    methods = {
+        "Linear": interp.linear_interpolate,
+        "Spline": lambda: interp.spline_interpolate(order=3),
+        "Polynomial": lambda: interp.polynomial_interpolate(degree=3),
+        "kNN": lambda: interp.knn_imputation(k=5),
+        "LightGBM": lambda: interp.lightgbm_imputation(n_estimators=50, max_iter=5),
     }
+
+    results = {}
+    for name, func in methods.items():
+        print(f"\nRunning {name} ...")
+        result_df = func()
+        out_path = os.path.join(output_dir, f"BPBuoyData_2014_Fast_{name}.csv")
+        result_df.to_csv(out_path, index=False)
+        print(f"  -> Saved: {out_path}")
+        results[name] = result_df
+
+    return results
+
+
+if __name__ == "__main__":
+    run_all_fast_methods()

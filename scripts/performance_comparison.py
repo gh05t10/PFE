@@ -1,139 +1,181 @@
 """
 performance_comparison.py
 --------------------------
-Evaluates six chlorophyll interpolation methods on the pre-B7 segment of
-the 2014 dataset using an 80/20 train-test split.
+Compare all 7 imputation methods using a held-out test approach:
 
-Strategy
---------
-1. Load the B7-removed CSV (NaN in the biofouling gap).
-2. Extract the portion BEFORE the B7 gap where data are clean.
-3. Mask the last 20 % of that segment as pseudo-missing data.
-4. Apply each method to fill the masked values.
-5. Compare predictions against the true values.
+1. Take the clean (non-B7) chlorophyll data.
+2. Randomly mask 20 % of it as "artificial missing".
+3. Apply every method to recover these values.
+4. Compute MAE, RMSE, MAPE, R² and execution time.
+5. Rank methods and save a summary report + CSV.
 
-Metrics: MAE, RMSE, R², MAPE, execution time.
-Output:  reports/performance_summary.txt
+Output
+------
+reports/performance_summary.txt
+reports/performance_comparison.csv
 """
 
 import os
+import sys
 import time
 import warnings
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-# Make the scripts directory importable when run directly
-import sys
-sys.path.insert(0, os.path.dirname(__file__))
-from chlorophyll_interpolation import ChlorophyllInterpolator, CHLOROPHYLL_COL, get_method_functions
+warnings.filterwarnings("ignore")
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "FRDR_dataset_1095")
-REPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")
+# Allow running from repo root
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-B7_REMOVED_FILE = os.path.join(DATA_DIR, "BPBuoyData_2014_B7Removed.csv")
-REPORT_FILE = os.path.join(REPORT_DIR, "performance_summary.txt")
+from scripts.chlorophyll_interpolation import ChlorophyllInterpolator
+from scripts.chlorophyll_advanced_imputation import AdvancedChlorophyllImputation
+
+DATA_DIR = "FRDR_dataset_1095"
+REPORTS_DIR = "reports"
+INPUT_B7REMOVED = os.path.join(DATA_DIR, "BPBuoyData_2014_B7Removed.csv")
+
+CHLRFU_COL = "ChlRFUShallow_RFU"
+TEST_FRACTION = 0.20
+RANDOM_STATE = 42
 
 
 def mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Mean Absolute Percentage Error (%)."""
     mask = y_true != 0
+    if mask.sum() == 0:
+        return float("nan")
     return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
 
 
+def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    return {
+        "MAE": round(mean_absolute_error(y_true, y_pred), 4),
+        "RMSE": round(np.sqrt(mean_squared_error(y_true, y_pred)), 4),
+        "MAPE": round(mape(y_true, y_pred), 4),
+        "R2": round(r2_score(y_true, y_pred), 4),
+    }
+
+
 def run_comparison(
-    input_path: str = B7_REMOVED_FILE,
-    report_path: str = REPORT_FILE,
+    input_csv: str = INPUT_B7REMOVED,
+    test_fraction: float = TEST_FRACTION,
+    random_state: int = RANDOM_STATE,
 ) -> pd.DataFrame:
-    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    """Run all 7 methods and return a DataFrame with performance metrics."""
 
-    df = pd.read_csv(input_path, parse_dates=["DateTime"])
+    # ------------------------------------------------------------------ #
+    # 1. Prepare evaluation dataset                                        #
+    # ------------------------------------------------------------------ #
+    df_base = pd.read_csv(input_csv, parse_dates=["DateTime"])
 
-    # Use only data BEFORE the B7 gap (no NaN in chlorophyll column)
-    pre_b7 = df[df[CHLOROPHYLL_COL].notna()].copy().reset_index(drop=True)
+    # Work only with rows where chlorophyll is NOT already NaN (i.e. non-B7)
+    valid_mask = df_base[CHLRFU_COL].notna()
+    valid_idx = df_base.index[valid_mask].tolist()
 
-    # Keep only the first continuous clean block (before the B7 gap starts)
-    b7_start_idx = df[df[CHLOROPHYLL_COL].isna()].index.min()
-    pre_b7 = df.loc[:b7_start_idx - 1, :].dropna(subset=[CHLOROPHYLL_COL]).copy()
-    pre_b7 = pre_b7.reset_index(drop=True)
+    rng = np.random.default_rng(random_state)
+    n_test = max(1, int(len(valid_idx) * test_fraction))
+    test_idx = rng.choice(valid_idx, size=n_test, replace=False)
 
-    split = int(len(pre_b7) * 0.8)
-    train_df = pre_b7.iloc[:split].copy()
-    test_df = pre_b7.iloc[split:].copy()
+    # Ground truth values at test positions
+    y_true = df_base.loc[test_idx, CHLRFU_COL].values.copy()
 
-    # Mask the test portion as NaN to simulate missing data
-    masked_df = pre_b7.copy()
-    masked_df.loc[masked_df.index[split:], CHLOROPHYLL_COL] = np.nan
-    y_true = test_df[CHLOROPHYLL_COL].values
+    # Create experiment dataframe: mask test positions as NaN
+    df_exp = df_base.copy()
+    df_exp.loc[test_idx, CHLRFU_COL] = float("nan")
 
-    methods = get_method_functions()
+    print(f"Evaluation setup: {len(valid_idx)} valid rows, {n_test} test positions masked.\n")
 
-    results = []
-    for name, fn in methods.items():
-        interp = ChlorophyllInterpolator(masked_df)
+    # ------------------------------------------------------------------ #
+    # 2. Define methods                                                   #
+    # ------------------------------------------------------------------ #
+    fast_interp = ChlorophyllInterpolator(df_exp)
+    adv_interp = AdvancedChlorophyllImputation(df_exp)
+
+    method_funcs = {
+        "Linear": fast_interp.linear_interpolate,
+        "Spline": lambda: fast_interp.spline_interpolate(order=3),
+        "Polynomial": lambda: fast_interp.polynomial_interpolate(degree=3),
+        "kNN": lambda: fast_interp.knn_imputation(k=5),
+        "LightGBM": lambda: fast_interp.lightgbm_imputation(n_estimators=50, max_iter=5),
+        "MissForest": lambda: adv_interp.missforest_imputation(n_estimators=50, max_iter=5),
+        "GaussianProcess": lambda: adv_interp.gaussian_process_imputation(n_restarts_optimizer=3),
+    }
+
+    # ------------------------------------------------------------------ #
+    # 3. Run each method and collect metrics                              #
+    # ------------------------------------------------------------------ #
+    records = []
+    for name, func in method_funcs.items():
+        print(f"Running {name} ...")
         t0 = time.time()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            filled = fn(interp)
-        elapsed = time.time() - t0
+        result_df = func()
+        elapsed = round(time.time() - t0, 3)
 
-        y_pred = filled.loc[split:, CHLOROPHYLL_COL].values[: len(y_true)]
+        y_pred = result_df.loc[test_idx, CHLRFU_COL].values
+        # Clamp negative predictions (chlorophyll cannot be negative)
+        y_pred = np.clip(y_pred, 0, None)
 
-        mae = mean_absolute_error(y_true, y_pred)
-        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-        r2 = r2_score(y_true, y_pred)
-        mape_val = mape(y_true, y_pred)
+        metrics = evaluate(y_true, y_pred)
+        metrics["Method"] = name
+        metrics["Group"] = "FAST" if name in {"Linear", "Spline", "Polynomial", "kNN", "LightGBM"} else "ADVANCED"
+        metrics["Time_s"] = elapsed
+        records.append(metrics)
 
-        results.append(
-            {
-                "Method": name,
-                "MAE": mae,
-                "RMSE": rmse,
-                "R2": r2,
-                "MAPE(%)": mape_val,
-                "Time(s)": elapsed,
-            }
-        )
-        print(f"  {name:<12} MAE={mae:.4f}  RMSE={rmse:.4f}  R²={r2:.4f}  "
-              f"MAPE={mape_val:.2f}%  t={elapsed:.2f}s")
+    # ------------------------------------------------------------------ #
+    # 4. Build summary DataFrame                                          #
+    # ------------------------------------------------------------------ #
+    cols_order = ["Method", "Group", "MAE", "RMSE", "MAPE", "R2", "Time_s"]
+    summary_df = pd.DataFrame(records)[cols_order].sort_values("RMSE")
+    return summary_df
 
-    results_df = pd.DataFrame(results).sort_values("MAE").reset_index(drop=True)
-    results_df["Rank"] = range(1, len(results_df) + 1)
 
-    header = f"{'Rank':<5} {'Method':<12} {'MAE':>8} {'RMSE':>8} {'R²':>8} {'MAPE(%)':>9} {'Time(s)':>8}"
-    separator = "-" * len(header)
-    rows = []
-    for _, row in results_df.iterrows():
-        star = " ⭐" if row["Rank"] == 1 else ""
-        rows.append(
-            f"{int(row['Rank']):<5} {row['Method']:<12} "
-            f"{row['MAE']:>8.4f} {row['RMSE']:>8.4f} {row['R2']:>8.4f} "
-            f"{row['MAPE(%)']:>9.2f} {row['Time(s)']:>8.2f}{star}"
-        )
+def write_summary(df: pd.DataFrame, path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("Imputation Method Performance Summary\n")
+        fh.write("=" * 60 + "\n\n")
+        fh.write("Ranked by RMSE (lower = better)\n\n")
 
-    report = "\n".join([
-        "=" * 65,
-        "Performance Comparison – Chlorophyll Interpolation Methods",
-        "=" * 65,
-        f"Dataset  : {input_path}",
-        f"Strategy : 80/20 train-test split on pre-B7 segment",
-        f"Test rows: {len(y_true)}",
-        "",
-        header,
-        separator,
-        *rows,
-        separator,
-        "",
-        "Best method (lowest MAE): " + results_df.iloc[0]["Method"],
-        "=" * 65,
-    ])
+        for rank, (_, row) in enumerate(df.iterrows(), 1):
+            star = "⭐⭐⭐" if rank == 1 else ("⭐⭐" if rank == 2 else "")
+            fh.write(
+                f"#{rank:2d} {row['Method']:<20} [{row['Group']}]  "
+                f"MAE={row['MAE']:.4f}  RMSE={row['RMSE']:.4f}  "
+                f"MAPE={row['MAPE']:.2f}%  R²={row['R2']:.4f}  "
+                f"Time={row['Time_s']:.3f}s  {star}\n"
+            )
 
-    print("\n" + report)
-    with open(report_path, "w") as fh:
-        fh.write(report)
-    print(f"\nReport saved to: {report_path}")
+        fh.write("\n\nColumn definitions\n")
+        fh.write("-" * 40 + "\n")
+        fh.write("MAE  = Mean Absolute Error (RFU)\n")
+        fh.write("RMSE = Root Mean Squared Error (RFU)\n")
+        fh.write("MAPE = Mean Absolute Percentage Error (%)\n")
+        fh.write("R²   = Coefficient of determination\n")
+        fh.write("Time = Wall-clock execution time (seconds)\n")
 
-    return results_df
+
+def main():
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+
+    if not os.path.exists(INPUT_B7REMOVED):
+        print(f"Input file not found: {INPUT_B7REMOVED}")
+        print("Run scripts/remove_biofouling_b7.py first.")
+        sys.exit(1)
+
+    summary_df = run_comparison()
+
+    csv_path = os.path.join(REPORTS_DIR, "performance_comparison.csv")
+    summary_df.to_csv(csv_path, index=False)
+    print(f"\nSaved performance CSV -> {csv_path}")
+
+    txt_path = os.path.join(REPORTS_DIR, "performance_summary.txt")
+    write_summary(summary_df, txt_path)
+    print(f"Saved performance summary -> {txt_path}")
+
+    print("\n" + "=" * 60)
+    print(summary_df.to_string(index=False))
 
 
 if __name__ == "__main__":
-    run_comparison()
+    main()

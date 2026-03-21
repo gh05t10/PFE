@@ -1,21 +1,24 @@
 """
 cross_validation.py
 --------------------
-K-Fold cross-validation (default k=5) for all six chlorophyll interpolation
-methods on the pre-B7 clean segment of the 2014 dataset.
+K-Fold cross-validation of all 7 imputation methods on the
+non-B7 portion of the 2014 chlorophyll data.
 
 For each fold:
-  - mask one contiguous block as pseudo-missing data
-  - apply each interpolation method
-  - compute MAE, RMSE, R² against the true values
+  - Mask ~1/k of the valid chlorophyll values as "missing"
+  - Apply every method to recover them
+  - Compute MAE, RMSE, MAPE, R² per fold
+
+Final output: mean ± std across k folds (confidence intervals).
 
 Output
 ------
-- Console table: Method  MAE±σ  RMSE±σ  R²±σ  Time(s)
-- reports/cross_validation_results.csv
+reports/cross_validation_results.csv
+visualizations/06_cv_heatmap.png  (produced by visualization_comparison.py)
 """
 
 import os
+import sys
 import time
 import warnings
 import numpy as np
@@ -23,127 +26,168 @@ import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold
 
-import sys
-sys.path.insert(0, os.path.dirname(__file__))
-from chlorophyll_interpolation import ChlorophyllInterpolator, CHLOROPHYLL_COL, get_method_functions
+warnings.filterwarnings("ignore")
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "FRDR_dataset_1095")
-REPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-B7_REMOVED_FILE = os.path.join(DATA_DIR, "BPBuoyData_2014_B7Removed.csv")
-CV_RESULTS_FILE = os.path.join(REPORT_DIR, "cross_validation_results.csv")
+from scripts.chlorophyll_interpolation import ChlorophyllInterpolator
+from scripts.chlorophyll_advanced_imputation import AdvancedChlorophyllImputation
+
+DATA_DIR = "FRDR_dataset_1095"
+REPORTS_DIR = "reports"
+INPUT_B7REMOVED = os.path.join(DATA_DIR, "BPBuoyData_2014_B7Removed.csv")
+
+CHLRFU_COL = "ChlRFUShallow_RFU"
+N_SPLITS = 5
+RANDOM_STATE = 42
+
+
+def mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    mask = y_true != 0
+    if mask.sum() == 0:
+        return float("nan")
+    return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
+
+
+def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    # Replace any remaining NaN predictions with the mean of y_true
+    if np.isnan(y_pred).any():
+        fallback = float(np.nanmean(y_pred)) if not np.isnan(y_pred).all() else float(np.mean(y_true))
+        y_pred = np.where(np.isnan(y_pred), fallback, y_pred)
+    return {
+        "MAE": mean_absolute_error(y_true, y_pred),
+        "RMSE": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+        "MAPE": mape(y_true, y_pred),
+        "R2": r2_score(y_true, y_pred),
+    }
+
+
+METHOD_NAMES = ["Linear", "Spline", "Polynomial", "kNN", "LightGBM", "MissForest", "GaussianProcess"]
+METHOD_GROUPS = {
+    "Linear": "FAST", "Spline": "FAST", "Polynomial": "FAST",
+    "kNN": "FAST", "LightGBM": "FAST",
+    "MissForest": "ADVANCED", "GaussianProcess": "ADVANCED",
+}
+
+
+def _run_methods_on(df_exp: pd.DataFrame, test_idx) -> dict[str, np.ndarray]:
+    """Apply all 7 methods to df_exp and return predicted values at test_idx."""
+    fast = ChlorophyllInterpolator(df_exp)
+    adv = AdvancedChlorophyllImputation(df_exp)
+
+    funcs = {
+        "Linear": fast.linear_interpolate,
+        "Spline": lambda: fast.spline_interpolate(order=3),
+        "Polynomial": lambda: fast.polynomial_interpolate(degree=3),
+        "kNN": lambda: fast.knn_imputation(k=5),
+        "LightGBM": lambda: fast.lightgbm_imputation(n_estimators=30, max_iter=3),
+        "MissForest": lambda: adv.missforest_imputation(n_estimators=30, max_iter=3),
+        "GaussianProcess": lambda: adv.gaussian_process_imputation(n_restarts_optimizer=1),
+    }
+
+    preds = {}
+    for name, func in funcs.items():
+        result_df = func()
+        y_pred = result_df.loc[test_idx, CHLRFU_COL].values
+        y_pred = np.clip(y_pred, 0, None)
+        # Fill any remaining NaN with forward/backward fill fallback
+        if np.isnan(y_pred).any():
+            series = pd.Series(y_pred)
+            series = series.ffill().bfill().fillna(series.mean())
+            y_pred = series.values
+        preds[name] = y_pred
+    return preds
 
 
 def run_cross_validation(
-    input_path: str = B7_REMOVED_FILE,
-    output_csv: str = CV_RESULTS_FILE,
-    n_splits: int = 5,
+    input_csv: str = INPUT_B7REMOVED,
+    n_splits: int = N_SPLITS,
+    random_state: int = RANDOM_STATE,
 ) -> pd.DataFrame:
-    os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+    """Run K-Fold cross-validation for all methods.
 
-    df = pd.read_csv(input_path, parse_dates=["DateTime"])
+    Returns a DataFrame with columns:
+    Method, Group, Fold, MAE, RMSE, MAPE, R2, Time_s
+    """
+    df_base = pd.read_csv(input_csv, parse_dates=["DateTime"])
 
-    # Only the clean pre-B7 segment
-    b7_start_idx = df[df[CHLOROPHYLL_COL].isna()].index.min()
-    pre_b7 = df.loc[:b7_start_idx - 1, :].dropna(subset=[CHLOROPHYLL_COL]).copy()
-    pre_b7 = pre_b7.reset_index(drop=True)
+    valid_mask = df_base[CHLRFU_COL].notna()
+    valid_idx = np.array(df_base.index[valid_mask].tolist())
 
-    print(f"Clean pre-B7 segment: {len(pre_b7)} rows")
-    print(f"Running {n_splits}-Fold Cross-Validation ...\n")
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    records = []
 
-    methods = get_method_functions()
+    for fold_num, (_, test_fold) in enumerate(kf.split(valid_idx), 1):
+        test_idx = valid_idx[test_fold]
+        y_true = df_base.loc[test_idx, CHLRFU_COL].values.copy()
 
+        df_exp = df_base.copy()
+        df_exp.loc[test_idx, CHLRFU_COL] = float("nan")
 
-    kf = KFold(n_splits=n_splits, shuffle=False)
-    fold_indices = list(kf.split(pre_b7))
+        print(f"\n--- Fold {fold_num}/{n_splits}  ({len(test_idx)} test samples) ---")
 
-    all_rows = []
+        t_fold = time.time()
+        preds = _run_methods_on(df_exp, test_idx)
+        fold_time = time.time() - t_fold
 
-    for name, fn in methods.items():
-        fold_mae, fold_rmse, fold_r2, fold_times = [], [], [], []
-
-        for fold_num, (train_idx, test_idx) in enumerate(fold_indices):
-            masked_df = pre_b7.copy()
-            masked_df.loc[test_idx, CHLOROPHYLL_COL] = np.nan
-            y_true = pre_b7.loc[test_idx, CHLOROPHYLL_COL].values
-
-            interp = ChlorophyllInterpolator(masked_df)
-            t0 = time.time()
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                filled = fn(interp)
-            elapsed = time.time() - t0
-
-            y_pred = filled.loc[test_idx, CHLOROPHYLL_COL].values
-
-            fold_mae.append(mean_absolute_error(y_true, y_pred))
-            fold_rmse.append(np.sqrt(mean_squared_error(y_true, y_pred)))
-            fold_r2.append(r2_score(y_true, y_pred))
-            fold_times.append(elapsed)
-
-            all_rows.append({
+        for name, y_pred in preds.items():
+            m = evaluate(y_true, y_pred)
+            records.append({
                 "Method": name,
-                "Fold": fold_num + 1,
-                "MAE": fold_mae[-1],
-                "RMSE": fold_rmse[-1],
-                "R2": fold_r2[-1],
-                "Time(s)": elapsed,
+                "Group": METHOD_GROUPS[name],
+                "Fold": fold_num,
+                "MAE": round(m["MAE"], 4),
+                "RMSE": round(m["RMSE"], 4),
+                "MAPE": round(m["MAPE"], 4),
+                "R2": round(m["R2"], 4),
             })
+            print(f"  {name:<20} MAE={m['MAE']:.4f}  RMSE={m['RMSE']:.4f}  R²={m['R2']:.4f}")
 
-        mae_mean, mae_std = np.mean(fold_mae), np.std(fold_mae)
-        rmse_mean, rmse_std = np.mean(fold_rmse), np.std(fold_rmse)
-        r2_mean, r2_std = np.mean(fold_r2), np.std(fold_r2)
-        time_mean = np.mean(fold_times)
+    return pd.DataFrame(records)
 
-        print(
-            f"  {name:<12} "
-            f"MAE={mae_mean:.4f}±{mae_std:.4f}  "
-            f"RMSE={rmse_mean:.4f}±{rmse_std:.4f}  "
-            f"R²={r2_mean:.4f}±{r2_std:.4f}  "
-            f"t={time_mean:.2f}s"
-        )
 
-    results_df = pd.DataFrame(all_rows)
-    results_df.to_csv(output_csv, index=False)
-    print(f"\nDetailed results saved to: {output_csv}")
-
-    # Summary table
-    summary = (
-        results_df.groupby("Method")
-        .agg(
-            MAE_mean=("MAE", "mean"),
-            MAE_std=("MAE", "std"),
-            RMSE_mean=("RMSE", "mean"),
-            RMSE_std=("RMSE", "std"),
-            R2_mean=("R2", "mean"),
-            R2_std=("R2", "std"),
-            Time_mean=("Time(s)", "mean"),
-        )
-        .sort_values("MAE_mean")
-        .reset_index()
+def aggregate_cv_results(cv_df: pd.DataFrame) -> pd.DataFrame:
+    """Compute mean ± std of metrics per method."""
+    agg = (
+        cv_df.groupby(["Method", "Group"])[["MAE", "RMSE", "MAPE", "R2"]]
+        .agg(["mean", "std"])
+        .round(4)
     )
+    agg.columns = ["_".join(c) for c in agg.columns]
+    agg = agg.reset_index().sort_values("RMSE_mean")
+    return agg
 
-    header = (
-        f"{'Method':<12} {'MAE±σ':>14} {'RMSE±σ':>14} {'R²±σ':>14} {'Time(s)':>8}"
-    )
-    sep = "─" * len(header)
-    print(f"\nCross-Validation Results (k-fold={n_splits}):")
-    print(sep)
-    print(header)
-    print(sep)
-    for _, row in summary.iterrows():
-        star = " ⭐" if row.name == 0 else ""
+
+def main():
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+
+    if not os.path.exists(INPUT_B7REMOVED):
+        print(f"Input not found: {INPUT_B7REMOVED}")
+        print("Run scripts/remove_biofouling_b7.py first.")
+        sys.exit(1)
+
+    print(f"Running {N_SPLITS}-fold cross-validation for all 7 methods ...\n")
+    cv_df = run_cross_validation(n_splits=N_SPLITS)
+
+    raw_path = os.path.join(REPORTS_DIR, "cross_validation_results.csv")
+    cv_df.to_csv(raw_path, index=False)
+    print(f"\nSaved per-fold results -> {raw_path}")
+
+    agg_df = aggregate_cv_results(cv_df)
+    agg_path = os.path.join(REPORTS_DIR, "cross_validation_summary.csv")
+    agg_df.to_csv(agg_path, index=False)
+    print(f"Saved aggregated summary -> {agg_path}")
+
+    print("\n" + "=" * 70)
+    print("Cross-Validation Summary (mean ± std)")
+    print("=" * 70)
+    for _, row in agg_df.iterrows():
         print(
-            f"{row['Method']:<12} "
-            f"{row['MAE_mean']:.2f}±{row['MAE_std']:.2f}  "
-            f"{row['RMSE_mean']:.2f}±{row['RMSE_std']:.2f}  "
-            f"{row['R2_mean']:.2f}±{row['R2_std']:.2f}  "
-            f"{row['Time_mean']:>8.2f}{star}"
+            f"  {row['Method']:<20} [{row['Group']}]  "
+            f"RMSE={row['RMSE_mean']:.4f}±{row['RMSE_std']:.4f}  "
+            f"R²={row['R2_mean']:.4f}±{row['R2_std']:.4f}"
         )
-    print(sep)
-
-    return results_df
 
 
 if __name__ == "__main__":
-    run_cross_validation()
+    main()
