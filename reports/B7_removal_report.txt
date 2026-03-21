@@ -1,0 +1,20 @@
+============================================================
+B7 Biofouling Removal Report
+============================================================
+Input file  : /home/runner/work/PFE/PFE/scripts/../FRDR_dataset_1095/BPBuoyData_2014_Cleaned.csv
+Output file : /home/runner/work/PFE/PFE/scripts/../FRDR_dataset_1095/BPBuoyData_2014_B7Removed.csv
+
+Total rows in dataset        : 8015
+Rows with B7 flag            : 604
+B7 period start              : 2014-08-20 05:15:00
+B7 period end                : 2014-08-26 12:00:00
+
+Statistics of removed values:
+  Mean   : 8.5234 RFU
+  Std    : 3.1259 RFU
+  Min    : 3.3000 RFU
+  Max    : 17.2000 RFU
+
+Normal chlorophyll range: 2-3 RFU
+Action: All B7-flagged chlorophyll values replaced with NaN.
+============================================================
