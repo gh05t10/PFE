@@ -13,6 +13,13 @@ env/
 FRDR_dataset_1095/BPBuoyData_2014_B7Removed.csv
 FRDR_dataset_1095/BPBuoyData_2014_Fast_*.csv
 FRDR_dataset_1095/BPBuoyData_2014_Advanced_*.csv
+FRDR_dataset_1095/BPBuoyData_2014_Preprocessed.csv
+FRDR_dataset_1095/ChlData_AllYears_Preprocessed.csv
+FRDR_dataset_1095/ChlData_Train.csv
+FRDR_dataset_1095/ChlData_Val.csv
+FRDR_dataset_1095/ChlData_Test.csv
+FRDR_dataset_1095/chl_scaler_params.json
+FRDR_dataset_1095/preprocessing_report.txt
 
 # Generated reports (produced by the pipeline scripts)
 reports/B7_removal_report.txt
@@ -23,6 +30,11 @@ reports/cross_validation_summary.csv
 
 # Generated visualizations (produced by the pipeline scripts)
 visualizations/
+figures/
+
+# Root-level figure PNGs (legacy)
+figure*.png
+ChlRFUShallow_RFU_*.png
 
 # Jupyter
 .ipynb_checkpoints/
