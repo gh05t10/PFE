@@ -1,0 +1,90 @@
+{
+  "target_col": "ChlRFUShallow_RFU",
+  "flag_col": "ChlRFUShallow_RFU_Flag",
+  "invalid_flags": [
+    "B7",
+    "C",
+    "M"
+  ],
+  "resample_rule": "30min",
+  "resample_step_minutes": 30,
+  "datetime_csv_format": "%Y-%m-%d %H:%M:%S",
+  "max_gap_timesteps": 2,
+  "max_gap_wall_minutes": 60,
+  "years_processed": [
+    2014,
+    2015,
+    2016,
+    2017,
+    2018,
+    2019,
+    2020,
+    2021
+  ],
+  "per_year": {
+    "2014": {
+      "n_rows": 4088,
+      "datetime_min": "2014-06-11 22:00:00",
+      "datetime_max": "2014-09-05 01:30:00",
+      "target_non_nan": 3716,
+      "target_nan": 372,
+      "target_valid_fraction": 0.9090019569471625
+    },
+    "2015": {
+      "n_rows": 6943,
+      "datetime_min": "2015-05-14 21:00:00",
+      "datetime_max": "2015-10-06 12:00:00",
+      "target_non_nan": 5766,
+      "target_nan": 1177,
+      "target_valid_fraction": 0.8304767391617457
+    },
+    "2016": {
+      "n_rows": 6384,
+      "datetime_min": "2016-05-18 16:30:00",
+      "datetime_max": "2016-09-28 16:00:00",
+      "target_non_nan": 6250,
+      "target_nan": 134,
+      "target_valid_fraction": 0.9790100250626567
+    },
+    "2017": {
+      "n_rows": 7433,
+      "datetime_min": "2017-05-09 17:00:00",
+      "datetime_max": "2017-10-11 13:00:00",
+      "target_non_nan": 7362,
+      "target_nan": 71,
+      "target_valid_fraction": 0.9904480021525629
+    },
+    "2018": {
+      "n_rows": 6808,
+      "datetime_min": "2018-05-15 16:00:00",
+      "datetime_max": "2018-10-04 11:30:00",
+      "target_non_nan": 5920,
+      "target_nan": 888,
+      "target_valid_fraction": 0.8695652173913043
+    },
+    "2019": {
+      "n_rows": 6090,
+      "datetime_min": "2019-05-29 17:00:00",
+      "datetime_max": "2019-10-03 13:30:00",
+      "target_non_nan": 6012,
+      "target_nan": 78,
+      "target_valid_fraction": 0.987192118226601
+    },
+    "2020": {
+      "n_rows": 5659,
+      "datetime_min": "2020-06-05 16:30:00",
+      "datetime_max": "2020-10-01 13:30:00",
+      "target_non_nan": 5067,
+      "target_nan": 592,
+      "target_valid_fraction": 0.8953878777169111
+    },
+    "2021": {
+      "n_rows": 6182,
+      "datetime_min": "2021-05-31 20:00:00",
+      "datetime_max": "2021-10-07 14:30:00",
+      "target_non_nan": 5977,
+      "target_nan": 205,
+      "target_valid_fraction": 0.9668392106114526
+    }
+  }
+}

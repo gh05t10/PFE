@@ -2,7 +2,7 @@
 Tiền xử lý cho dự báo nồng độ shallow chlorophyll (ChlRFUShallow_RFU), ưu tiên horizon dài.
 
 Pipeline gợi ý:
-- Đầu vào: các file ``BPBuoyData_{year}_Preprocessed.csv`` (lưới 10 phút) từ
+- Đầu vào: các file ``BPBuoyData_{year}_Preprocessed.csv`` (lưới 30 phút, DateTime chuẩn) từ
   ``chl_ground_truth_preprocessing.preprocess_all_years`` hoặc ``data_preprocessing.py``.
 - Bước 1: nối đa năm theo thời gian.
 - Bước 2: tổng hợp theo ngày (mean) — giảm nhiễu tần số cao, phù hợp dự báo tuần/tháng/mùa.
