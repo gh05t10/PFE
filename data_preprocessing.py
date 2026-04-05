@@ -219,7 +219,11 @@ def interpolate_short_gaps(
     series = series.copy()
     na_before = int(series.isna().sum())
 
-    freq = series.index.to_series().diff().dropna().mode()[0]
+    diffs = series.index.to_series().diff().dropna()
+    if diffs.empty:
+        return series, 0
+    mode_vals = diffs.mode()
+    freq = mode_vals.iloc[0] if not mode_vals.empty else diffs.median()
 
     is_nan = series.isna()
     nan_groups = (is_nan != is_nan.shift()).cumsum()
@@ -247,9 +251,9 @@ def gap_summary(series: pd.Series) -> pd.DataFrame:
     gap_ends = series.index[transitions == -1]
 
     if is_nan.iloc[0]:
-        gap_starts = series.index[:1].append(gap_starts)
+        gap_starts = pd.Index([series.index[0]]).append(gap_starts)
     if is_nan.iloc[-1]:
-        gap_ends = gap_ends.append(series.index[-1:])
+        gap_ends = gap_ends.append(pd.Index([series.index[-1]]))
 
     records = []
     for s, e in zip(gap_starts, gap_ends):
