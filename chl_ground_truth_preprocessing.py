@@ -15,8 +15,9 @@ Pipeline (chuẩn 30 phút)
 1. Chuẩn hóa ``DateTime``: parse thống nhất; nếu có timezone thì quy về UTC rồi
    lưu dạng naive; làm tròn tới giây; khi ghi CSV dùng ``YYYY-MM-DD HH:MM:SS``.
 2. Loại giá trị target không tin cậy theo cờ (mặc định B7, C, M).
-3. Resample toàn bộ cột lên lưới **30 phút** (mean numeric, ``first`` cho *_Flag*),
-   phủ từ mốc thời gian min–max của năm.
+3. Resample toàn bộ cột lên lưới **30 phút** (mean cho đo số; với *_Flag* lấy mẫu
+   **đầu tiên theo thời gian** trong bin — không dùng ``.first()`` của pandas vì
+   nó bỏ qua NaN và lệch cờ), phủ từ mốc thời gian min–max của năm.
 4. Nội suy tuyến tính theo thời gian **chỉ** cho ``ChlRFUShallow_RFU`` tại các
    đoạn NaN liên tiếp có độ dài ≤ *max_gap_timesteps* (mặc định 2 bước = 1 giờ),
    để không “bịa” dữ liệu trong mất tín hiệu dài.
@@ -116,24 +117,59 @@ def clean_chlorophyll(
     return df
 
 
+def _chronological_first(series: pd.Series) -> Any:
+    """Giá trị tại mốc thời gian sớm nhất trong bin (kể cả NaN).
+
+    ``Resampler.first()`` của pandas bỏ qua NaN, nên cờ ở mẫu sau trong cùng bin
+    (vd. B7 lúc 05:15) bị gán nhầm lên nhãn đầu bin (05:00). Dùng ``iloc[0]`` sau
+    khi đã sort index để khớp bản ghi gốc.
+    """
+    if series.empty:
+        return np.nan
+    return series.iloc[0]
+
+
 def resample_to_grid(df: pd.DataFrame, rule: str = DEFAULT_RESAMPLE_RULE) -> pd.DataFrame:
-    """Resample lên lưới đều *rule* (vd. ``30min``); numeric = mean, object = first."""
+    """Resample lên lưới đều *rule* (vd. ``30min``).
+
+    - Cột đo số (không phải *_Flag*): ``mean``.
+    - Mọi cột ``*_Flag`` và cột non-numeric khác: lấy **mẫu đầu theo thời gian**
+      trong bin (``iloc[0]``), không dùng ``.first()`` của pandas.
+    """
     df = df.copy().set_index("DateTime").sort_index()
     start = df.index.min().floor(rule)
     end = df.index.max().ceil(rule)
     full_index = pd.date_range(start=start, end=end, freq=rule)
 
-    numeric_cols = df.select_dtypes(include="number").columns.tolist()
-    string_cols = df.select_dtypes(exclude="number").columns.tolist()
+    flag_cols = [c for c in df.columns if c.endswith("_Flag")]
+    numeric_cols = [
+        c
+        for c in df.columns
+        if c not in flag_cols and pd.api.types.is_numeric_dtype(df[c])
+    ]
+    other_cols = [c for c in df.columns if c not in flag_cols and c not in numeric_cols]
 
-    resampled_numeric = (
-        df[numeric_cols].resample(rule).mean() if numeric_cols else pd.DataFrame(index=full_index)
-    )
-    resampled_string = (
-        df[string_cols].resample(rule).first() if string_cols else pd.DataFrame(index=full_index)
-    )
+    parts: list[pd.DataFrame] = []
+    if numeric_cols:
+        parts.append(df[numeric_cols].resample(rule).mean())
+    if flag_cols:
+        flag_df = pd.concat(
+            [df[c].resample(rule).apply(_chronological_first).rename(c) for c in flag_cols],
+            axis=1,
+        )
+        parts.append(flag_df)
+    if other_cols:
+        other_df = pd.concat(
+            [df[c].resample(rule).apply(_chronological_first).rename(c) for c in other_cols],
+            axis=1,
+        )
+        parts.append(other_df)
 
-    resampled = pd.concat([resampled_numeric, resampled_string], axis=1)
+    if not parts:
+        resampled = pd.DataFrame(index=full_index)
+    else:
+        resampled = pd.concat(parts, axis=1)
+
     resampled = resampled.reindex(full_index)
     resampled = resampled[[c for c in df.columns if c in resampled.columns]]
     resampled.index.name = "DateTime"
