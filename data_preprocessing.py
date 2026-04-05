@@ -15,15 +15,15 @@ Pipeline steps
    - C  (faulty / unrealistic data)                    → ``ChlRFUShallow_RFU`` set to NaN
    - M  (missing)                                      → value is already NaN in source
 3. Physical-range validation: values < 0 → NaN (fluorescence cannot be negative).
-4. Export per-year preprocessed CSVs preserving all original columns.
+4. Export per-year preprocessed CSVs to the ``data/`` output directory.
 5. Tukey outlier removal computed per deployment year:
    lower fence = Q1 − k × IQR, upper fence = Q3 + k × IQR (k = 3.0 "far-out").
    Per-year computation preserves genuine inter-annual bloom variability.
 6. Resample the combined series to a regular 30-minute grid (mean aggregation).
 7. Linear interpolation of short gaps (≤ 2 h = 4 consecutive missing 30-min bins).
    Longer gaps remain NaN to preserve temporal structure for the forecasting model.
-8. Export ``ChlRFUShallow_RFU_GroundTruth.csv`` — a single-column, regularly-sampled,
-   gap-filled time series ready for use as model ground truth.
+8. Export ``data/ChlRFUShallow_RFU_GroundTruth.csv`` — a single-column,
+   regularly-sampled, gap-filled time series ready for use as model ground truth.
 9. Print a gap and data-coverage summary.
 """
 
@@ -38,6 +38,7 @@ import seaborn as sns
 # ─── constants ────────────────────────────────────────────────────────────────
 
 DATA_DIR = "FRDR_dataset_1095"
+OUTPUT_DIR = "data"
 YEARS = list(range(2014, 2022))
 TARGET_COL = "ChlRFUShallow_RFU"
 FLAG_COL = "ChlRFUShallow_RFU_Flag"
@@ -339,7 +340,7 @@ def plot_ground_truth(
 
 def preprocess_2014_data(
     input_path: str = "FRDR_dataset_1095/BPBuoyData_2014_Cleaned.csv",
-    output_path: str = "FRDR_dataset_1095/BPBuoyData_2014_Preprocessed.csv",
+    output_path: str = os.path.join("data", "BPBuoyData_2014_Preprocessed.csv"),
     flag_value: str = "B7",
 ) -> int:
     """Remove biofouling-affected chlorophyll measurements from the 2014 dataset.
@@ -387,7 +388,7 @@ def preprocess_2014_data(
 
 def plot_preprocessed_2014() -> None:
     """Plot the preprocessed 2014 chlorophyll series."""
-    data_path = "FRDR_dataset_1095/BPBuoyData_2014_Preprocessed.csv"
+    data_path = "data/BPBuoyData_2014_Preprocessed.csv"
     df = pd.read_csv(data_path, parse_dates=["DateTime"])
 
     plt.figure(figsize=(12, 6))
@@ -405,8 +406,8 @@ def plot_preprocessed_2014() -> None:
 
 def run_full_pipeline(
     data_dir: str = DATA_DIR,
-    output_dir: str = DATA_DIR,
-    ground_truth_path: str = "ChlRFUShallow_RFU_GroundTruth.csv",
+    output_dir: str = OUTPUT_DIR,
+    ground_truth_path: str = os.path.join(OUTPUT_DIR, "ChlRFUShallow_RFU_GroundTruth.csv"),
 ) -> pd.Series:
     """Run the complete preprocessing pipeline for ChlRFUShallow_RFU.
 
@@ -430,6 +431,8 @@ def run_full_pipeline(
     print("=" * 60)
     print("ChlRFUShallow_RFU Ground-Truth Preprocessing Pipeline")
     print("=" * 60)
+
+    os.makedirs(output_dir, exist_ok=True)
 
     # ── 1. Load all years ────────────────────────────────────────
     print("\n[1] Loading data …")
