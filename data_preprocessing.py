@@ -206,7 +206,7 @@ def remove_tukey_outliers(
     return series, total_removed
 
 
-# ─── step 6: resample to regular 10-minute grid ───────────────────────────────
+# ─── step 6: resample to regular 30-minute grid ───────────────────────────────
 
 def resample_to_regular_grid(
     series: pd.Series,
