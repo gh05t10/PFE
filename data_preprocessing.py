@@ -8,16 +8,19 @@ which serves as ground-truth for downstream forecasting models.
 Pipeline steps
 --------------
 1. Load each annual CSV (2014-2021) and concatenate into one DataFrame.
+   Normalize DateTime: strip any timezone offset, floor to the minute, and
+   ensure a uniform ``YYYY-MM-DD HH:MM:SS`` format across all years.
 2. Apply dataset quality flags:
    - B7 (biofouling spike / decrease after site visit) → ``ChlRFUShallow_RFU`` set to NaN
    - C  (faulty / unrealistic data)                    → ``ChlRFUShallow_RFU`` set to NaN
    - M  (missing)                                      → value is already NaN in source
 3. Physical-range validation: values < 0 → NaN (fluorescence cannot be negative).
 4. Export per-year preprocessed CSVs preserving all original columns.
-5. Statistical outlier removal using a rolling 24-hour IQR upper fence (k = 4.5),
-   targeting isolated spikes that were not caught by the quality flags.
-6. Resample the combined series to a regular 10-minute grid (mean aggregation).
-7. Linear interpolation of short gaps (≤ 2 h = 12 consecutive missing 10-min bins).
+5. Tukey outlier removal computed per deployment year:
+   lower fence = Q1 − k × IQR, upper fence = Q3 + k × IQR (k = 3.0 "far-out").
+   Per-year computation preserves genuine inter-annual bloom variability.
+6. Resample the combined series to a regular 30-minute grid (mean aggregation).
+7. Linear interpolation of short gaps (≤ 2 h = 4 consecutive missing 30-min bins).
    Longer gaps remain NaN to preserve temporal structure for the forecasting model.
 8. Export ``ChlRFUShallow_RFU_GroundTruth.csv`` — a single-column, regularly-sampled,
    gap-filled time series ready for use as model ground truth.
@@ -41,21 +44,42 @@ FLAG_COL = "ChlRFUShallow_RFU_Flag"
 # Quality flags that render the chlorophyll measurement invalid
 INVALID_FLAGS = {"B7", "C"}
 # Regular temporal resolution for the ground-truth grid
-RESAMPLE_FREQ = "10min"
+RESAMPLE_FREQ = "30min"
 # Maximum consecutive gap duration to fill by linear interpolation
 INTERP_MAX_GAP = pd.Timedelta("2h")
-# IQR fence multiplier for upper-tail outlier detection (conservative)
-OUTLIER_IQR_K = 4.5
-# Rolling time window used for outlier detection
-ROLLING_WINDOW = "24h"
+# Tukey "far-out" IQR fence multiplier (k=3.0 preserves genuine bloom events)
+TUKEY_K = 3.0
 
 
 # ─── step 1: load ─────────────────────────────────────────────────────────────
 
+def normalize_datetime(series: pd.Series) -> pd.Series:
+    """Return a timezone-naive, minute-floored DatetimeSeries in ISO format.
+
+    Ensures a uniform ``YYYY-MM-DD HH:MM:SS`` timestamp across all annual
+    files regardless of how each CSV originally recorded the DateTime column
+    (mixed timezones, fractional seconds, etc.).
+
+    Parameters
+    ----------
+    series : pd.Series
+        Raw DateTime column, already parsed by ``pd.read_csv``.
+
+    Returns
+    -------
+    pd.Series
+        Timezone-naive datetime64 series floored to the minute.
+    """
+    if series.dt.tz is not None:
+        series = series.dt.tz_convert("UTC").dt.tz_localize(None)
+    return series.dt.floor("min")
+
+
 def load_year(year: int, data_dir: str = DATA_DIR) -> pd.DataFrame:
-    """Load one annual CSV, parse DateTime, and tag with a Year column."""
+    """Load one annual CSV, parse DateTime, normalize it, and tag with a Year column."""
     path = os.path.join(data_dir, f"BPBuoyData_{year}_Cleaned.csv")
     df = pd.read_csv(path, parse_dates=["DateTime"], low_memory=False)
+    df["DateTime"] = normalize_datetime(df["DateTime"])
     df["Year"] = year
     return df
 
@@ -129,43 +153,57 @@ def apply_physical_bounds(
     return df, int(mask.sum())
 
 
-# ─── step 5: statistical outlier removal ─────────────────────────────────────
+# ─── step 5: Tukey outlier removal ───────────────────────────────────────────
 
-def remove_statistical_outliers(
+def remove_tukey_outliers(
     series: pd.Series,
-    window: str = ROLLING_WINDOW,
-    k: float = OUTLIER_IQR_K,
+    k: float = TUKEY_K,
 ) -> tuple:
-    """Remove isolated upper-tail spikes using a rolling IQR fence.
+    """Remove outliers using Tukey's fences computed per deployment year.
 
-    A rolling Q75 and IQR are computed over a *window*-wide time window.
-    Any value above Q75 + k × IQR is set to NaN.  Only the upper fence is
-    applied because chlorophyll cannot be negative and low values carry
-    physical meaning (e.g. night-time minima).
+    For each calendar year present in *series*, the first (Q1) and third (Q3)
+    quartiles and the interquartile range (IQR) are computed from valid
+    observations in that year only.  Any value outside the interval
+    ``[Q1 − k × IQR,  Q3 + k × IQR]`` is set to NaN.
+
+    Using ``k = 3.0`` ("far-out" criterion) is deliberately conservative so
+    that genuine inter-annual bloom events are preserved.  Applying the fences
+    per year rather than globally prevents high-bloom years from masking outliers
+    in low-bloom years, and vice-versa.
 
     Parameters
     ----------
     series : pd.Series
-        Time-indexed ChlRFU series (must have a DatetimeIndex).
-    window : str
-        Rolling time window string passed to ``pd.Series.rolling`` (default '24h').
+        Time-indexed ChlRFU series with a DatetimeIndex.
     k : float
-        IQR fence multiplier (default 4.5 — very conservative).
+        Tukey fence multiplier (default 3.0).
 
     Returns
     -------
     tuple[pd.Series, int]
-        Cleaned series and count of outliers removed.
+        Cleaned series and total count of outliers removed.
     """
     series = series.copy()
-    rolling = series.rolling(window, center=True, min_periods=3)
-    q75 = rolling.quantile(0.75)
-    q25 = rolling.quantile(0.25)
-    iqr = q75 - q25
-    upper_fence = q75 + k * iqr
-    outlier_mask = series > upper_fence
-    series.loc[outlier_mask] = np.nan
-    return series, int(outlier_mask.sum())
+    total_removed = 0
+
+    for year in series.index.year.unique():
+        yr_mask = series.index.year == year
+        yr_vals = series.loc[yr_mask]
+        valid = yr_vals.dropna()
+        if valid.empty:
+            continue
+        q1 = valid.quantile(0.25)
+        q3 = valid.quantile(0.75)
+        iqr = q3 - q1
+        lower = q1 - k * iqr
+        upper = q3 + k * iqr
+        outlier_mask = yr_mask & ((series < lower) | (series > upper))
+        n = int(outlier_mask.sum())
+        if n:
+            series.loc[outlier_mask] = np.nan
+            total_removed += n
+
+    return series, total_removed
 
 
 # ─── step 6: resample to regular 10-minute grid ───────────────────────────────
@@ -183,7 +221,7 @@ def resample_to_regular_grid(
     series : pd.Series
         Time-indexed series.
     freq : str
-        Target frequency string (default '10min').
+        Target frequency string (default '30min').
 
     Returns
     -------
@@ -387,7 +425,7 @@ def run_full_pipeline(
     -------
     pd.Series
         The final cleaned, regularly-sampled, gap-filled ground-truth series
-        with a DatetimeIndex at 10-minute resolution.
+        with a DatetimeIndex at 30-minute resolution.
     """
     print("=" * 60)
     print("ChlRFUShallow_RFU Ground-Truth Preprocessing Pipeline")
@@ -424,12 +462,12 @@ def run_full_pipeline(
     # ── Prepare time-indexed series for remaining steps ──────────
     chl = df_all.set_index("DateTime")[TARGET_COL].sort_index()
 
-    # ── 5. Statistical outlier removal ───────────────────────────
-    print(f"\n[5] Statistical outlier removal  (rolling {ROLLING_WINDOW} IQR, k={OUTLIER_IQR_K}) …")
-    chl, n_outliers = remove_statistical_outliers(chl)
-    print(f"    {n_outliers:,} statistical outliers removed.")
+    # ── 5. Tukey outlier removal ─────────────────────────────────
+    print(f"\n[5] Tukey outlier removal  (per-year fences, k={TUKEY_K}) …")
+    chl, n_outliers = remove_tukey_outliers(chl)
+    print(f"    {n_outliers:,} outliers removed.")
 
-    # ── 6. Resample to regular 10-minute grid ────────────────────
+    # ── 6. Resample to regular 30-minute grid ────────────────────
     print(f"\n[6] Resampling to {RESAMPLE_FREQ} regular grid …")
     chl = resample_to_regular_grid(chl)
     n_missing = int(chl.isna().sum())
