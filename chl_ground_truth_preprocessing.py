@@ -15,9 +15,9 @@ Pipeline (chuẩn 30 phút)
 1. Chuẩn hóa ``DateTime``: parse thống nhất; nếu có timezone thì quy về UTC rồi
    lưu dạng naive; làm tròn tới giây; khi ghi CSV dùng ``YYYY-MM-DD HH:MM:SS``.
 2. Loại giá trị target không tin cậy theo cờ (mặc định B7, C, M).
-3. Resample toàn bộ cột lên lưới **30 phút** (mean cho đo số; với *_Flag* lấy mẫu
-   **đầu tiên theo thời gian** trong bin — không dùng ``.first()`` của pandas vì
-   nó bỏ qua NaN và lệch cờ), phủ từ mốc thời gian min–max của năm.
+3. Resample toàn bộ cột lên lưới **30 phút** (mean cho đo số; với ``ChlRFUShallow_RFU``
+   dùng mean **cắt** tại lần cờ B7/C/M đầu tiên trong bin để không trộn miss và
+   phần hồi phục; *_Flag* lấy mẫu **đầu theo thời gian** trong bin), phủ từ min–max.
 4. Nội suy tuyến tính theo thời gian **chỉ** cho ``ChlRFUShallow_RFU`` tại các
    đoạn NaN liên tiếp có độ dài ≤ *max_gap_timesteps* (mặc định 2 bước = 1 giờ),
    để không “bịa” dữ liệu trong mất tín hiệu dài.
@@ -117,6 +117,32 @@ def clean_chlorophyll(
     return df
 
 
+def _truncated_mean_until_first_bad_flag(
+    win: pd.DataFrame,
+    value_col: str,
+    flag_col: str,
+    bad_flags: frozenset[str],
+) -> float:
+    """Trung bình *value_col* chỉ trên các mẫu **trước** mẫu đầu tiên mang cờ xấu trong bin.
+
+    Nếu mẫu đầu tiên theo thời gian trong bin đã có cờ thuộc *bad_flags* → trả về NaN
+    (không lấy mean của phần sau khi cảm biến “bật lại” trong cùng bin — lỗi 2015-05-17 10:00).
+
+    Nếu không có cờ xấu trong bin → ``mean`` toàn bin (như cũ).
+    """
+    if win.empty:
+        return np.nan
+    flags = win[flag_col]
+    vals = win[value_col]
+    for i in range(len(win)):
+        f = flags.iloc[i]
+        if pd.notna(f) and str(f).strip() in bad_flags:
+            if i == 0:
+                return np.nan
+            return float(vals.iloc[:i].mean(skipna=True))
+    return float(vals.mean(skipna=True))
+
+
 def _chronological_first(series: pd.Series) -> Any:
     """Giá trị tại mốc thời gian sớm nhất trong bin (kể cả NaN).
 
@@ -133,6 +159,8 @@ def resample_to_grid(df: pd.DataFrame, rule: str = DEFAULT_RESAMPLE_RULE) -> pd.
     """Resample lên lưới đều *rule* (vd. ``30min``).
 
     - Cột đo số (không phải *_Flag*): ``mean``.
+    - Riêng ``ChlRFUShallow_RFU``: mean chỉ trên đoạn **trước** lần đầu xuất hiện
+      cờ B7/C/M trong bin (xem ``_truncated_mean_until_first_bad_flag``).
     - Mọi cột ``*_Flag`` và cột non-numeric khác: lấy **mẫu đầu theo thời gian**
       trong bin (``iloc[0]``), không dùng ``.first()`` của pandas.
     """
@@ -149,9 +177,28 @@ def resample_to_grid(df: pd.DataFrame, rule: str = DEFAULT_RESAMPLE_RULE) -> pd.
     ]
     other_cols = [c for c in df.columns if c not in flag_cols and c not in numeric_cols]
 
+    use_trunc_chl = TARGET_COL in numeric_cols and FLAG_COL in df.columns
+    numeric_for_mean = [c for c in numeric_cols if not (use_trunc_chl and c == TARGET_COL)]
+
     parts: list[pd.DataFrame] = []
-    if numeric_cols:
-        parts.append(df[numeric_cols].resample(rule).mean())
+    if numeric_for_mean:
+        parts.append(df[numeric_for_mean].resample(rule).mean())
+    if use_trunc_chl:
+        grouper = pd.Grouper(freq=rule, label="left", closed="left")
+
+        def _agg_chl_window(w: pd.DataFrame) -> float:
+            return _truncated_mean_until_first_bad_flag(w, TARGET_COL, FLAG_COL, DEFAULT_INVALID_FLAGS)
+
+        gb = df.groupby(grouper, group_keys=True)[[TARGET_COL, FLAG_COL]]
+        try:
+            chl_agg = gb.apply(_agg_chl_window, include_groups=False)
+        except TypeError:
+            chl_agg = gb.apply(_agg_chl_window)
+        if isinstance(chl_agg, pd.Series):
+            chl_series = chl_agg
+        else:
+            chl_series = chl_agg.squeeze(axis=1)
+        parts.append(chl_series.rename(TARGET_COL).to_frame())
     if flag_cols:
         flag_df = pd.concat(
             [df[c].resample(rule).apply(_chronological_first).rename(c) for c in flag_cols],
