@@ -1,14 +1,15 @@
 import os
+from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
-import numpy as np
 import matplotlib.patches as mpatches
 import matplotlib.dates as mdates
 import seaborn as sns
 
-# directory containing the buoy CSVs
-DATA_DIR = "FRDR_dataset_1095"
-OUTPUT_DIR = "shallow-chlorophyll-viz"
+# Resolve paths from this file so execution works from any current directory.
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "FRDR_dataset_1095"
+OUTPUT_DIR = BASE_DIR / "shallow-chlorophyll-viz"
 
 
 def load_all_data(data_dir: str = DATA_DIR) -> pd.DataFrame:
@@ -21,7 +22,7 @@ def load_all_data(data_dir: str = DATA_DIR) -> pd.DataFrame:
     for fname in sorted(os.listdir(data_dir)):
         if fname.startswith("BPBuoyData") and fname.endswith("_Cleaned.csv"):
             path = os.path.join(data_dir, fname)
-            df = pd.read_csv(path, parse_dates=["DateTime"], infer_datetime_format=True)
+            df = pd.read_csv(path, parse_dates=["DateTime"], low_memory=False)
             df["Year"] = df["DateTime"].dt.year
             frames.append(df)
     if not frames:
@@ -157,7 +158,7 @@ def plot_with_flag_bands(
     ax.set_ylabel(variable)
     plt.tight_layout()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    plt.savefig(os.path.join(OUTPUT_DIR, f"figure{year}.png"))
+    plt.savefig(os.path.join(OUTPUT_DIR, f"figure{year}.png"), dpi=150)
     plt.close(fig)
 
 
