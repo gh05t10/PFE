@@ -32,7 +32,7 @@ def _days_in_month(year: int, month: int) -> int:
     return int(pd.Timestamp(year=year, month=month, day=1).days_in_month)
 
 
-def audit_rule_a(ts: pd.DataFrame, *, p: float = 1.0) -> pd.DataFrame:
+def audit_rule_a(ts: pd.DataFrame, *, p: float = 0.8) -> pd.DataFrame:
     """
     For each calendar month overlapping *ts*, report whether Rule A(p) passes.
 
@@ -118,7 +118,7 @@ def monthly_ground_truth_rule_a(ts: pd.DataFrame, audit: pd.DataFrame) -> pd.Dat
     return monthly_all
 
 
-def run_rule_a_export(data_dir: Path, out_dir: Path, *, p: float = 1.0) -> None:
+def run_rule_a_export(data_dir: Path, out_dir: Path, *, p: float = 0.8) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = load_trimmed_chl_frames(data_dir)
     audit = audit_rule_a(ts, p=p)

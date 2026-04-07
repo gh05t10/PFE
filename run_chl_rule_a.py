@@ -14,8 +14,8 @@ def main() -> None:
     ap.add_argument(
         "--p",
         type=float,
-        default=1.0,
-        help="Month coverage threshold: n_days_with_data / n_days_required >= p (default: 1.0).",
+        default=0.8,
+        help="Month coverage threshold: n_days_with_data / n_days_required >= p (default: 0.8).",
     )
     args = ap.parse_args()
 
