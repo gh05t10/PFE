@@ -29,3 +29,12 @@
 ## Implementation
 
 See `src/chl_gt_outlier.py` and `run_gt_outlier_pipeline.py`.
+
+### Transformer training file
+
+`processed/chl_shallow/chl_shallow_transformer_gt.csv` keeps **raw** `ChlRFUShallow_RFU` and adds:
+
+- `weight_chl_gt`: **1.0** on timesteps to keep in loss, **0.0** on Hampel spike timesteps (no neighbour imputation).
+- `weight_chl_gt_conservative`: same but using the stricter combined rule (Hampel ∧ monthly-daily Tukey).
+
+Use `sum((pred - y)^2 * weight) / sum(weight)` (or PyTorch masked loss) instead of replacing values.

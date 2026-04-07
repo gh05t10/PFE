@@ -12,7 +12,10 @@ if __name__ == "__main__":
         out_dir=base / "processed" / "chl_shallow",
         hampel_window=97,
         hampel_n_sigma=3.0,
-        winsor_inner=True,
+        winsor_inner=False,
     )
     run_gt_outlier_export(cfg)
-    print(f"Wrote chl_gt_outlier_flags.csv and related outputs under {cfg.out_dir}")
+    print(
+        f"Wrote chl_gt_outlier_flags.csv, chl_shallow_transformer_gt.csv "
+        f"and related outputs under {cfg.out_dir}"
+    )

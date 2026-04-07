@@ -10,6 +10,9 @@ Design notes (see ``literature/outlier_handling_shallow_chl.md``):
     style papers (inner 1.5×IQR, outer 3×IQR) for benchmarking only — not ideal alone.
 
 Outputs are **labels + optional winsorization**; we avoid silently deleting samples.
+
+**Transformer default:** keep ``ChlRFUShallow_RFU`` unchanged; add **loss weights**
+(0 on suspected spikes, 1 otherwise) instead of neighbour-mean imputation.
 """
 
 from __future__ import annotations
@@ -122,7 +125,7 @@ class GtOutlierExportConfig:
     out_dir: Path
     hampel_window: int
     hampel_n_sigma: float
-    winsor_inner: bool
+    winsor_inner: bool = False
 
 
 def run_gt_outlier_export(cfg: GtOutlierExportConfig) -> None:
@@ -149,6 +152,10 @@ def run_gt_outlier_export(cfg: GtOutlierExportConfig) -> None:
     out["flag_tukey_monthly_daily_potential"] = m_flag
     out["flag_combined_conservative"] = combined
 
+    # Loss weights: 1 = full contribution, 0 = exclude/down-weight (no neighbour imputation)
+    out["weight_chl_gt"] = (~pd.Series(h_flag, index=df.index)).astype(np.float64)
+    out["weight_chl_gt_conservative"] = (~pd.Series(combined, index=df.index)).astype(np.float64)
+
     w = df[TARGET_COL].astype(float).copy()
     if cfg.winsor_inner and np.isfinite(y).any():
         lo_i, hi_i = tukey_fences(y[np.isfinite(y)], k=1.5)
@@ -156,20 +163,38 @@ def run_gt_outlier_export(cfg: GtOutlierExportConfig) -> None:
         wvals = np.where(np.isfinite(wvals) & (wvals < lo_i), lo_i, wvals)
         wvals = np.where(np.isfinite(wvals) & (wvals > hi_i), hi_i, wvals)
         w = pd.Series(wvals, index=w.index)
-    out[f"{TARGET_COL}_winsor_global_inner"] = w
+        out[f"{TARGET_COL}_winsor_global_inner"] = w
 
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     out.reset_index().to_csv(cfg.out_dir / "chl_gt_outlier_flags.csv", index=False)
     daily_t.to_csv(cfg.out_dir / "chl_daily_median_tukey_by_month.csv")
 
+    # Slim training table: original GT + masks only (recommended for Transformer loss)
+    slim = pd.DataFrame(
+        {
+            "DateTime": df.index,
+            TARGET_COL: df[TARGET_COL].values,
+            "weight_chl_gt": out["weight_chl_gt"].values,
+            "weight_chl_gt_conservative": out["weight_chl_gt_conservative"].values,
+        }
+    )
+    if "ChlRFUShallow_RFU_Flag" in df.columns:
+        slim["ChlRFUShallow_RFU_Flag"] = df["ChlRFUShallow_RFU_Flag"].values
+    if "source_file" in df.columns:
+        slim["source_file"] = df["source_file"].values
+    slim.to_csv(cfg.out_dir / "chl_shallow_transformer_gt.csv", index=False)
+
     summary = [
         f"input: {cfg.input_csv}",
         f"samples: {len(out):,}",
         f"Hampel window={cfg.hampel_window}, n_sigma={cfg.hampel_n_sigma}",
+        f"winsor_inner: {cfg.winsor_inner}",
         f"count flag_hampel_spike: {int(h_flag.sum())}",
         f"count flag_tukey_global_potential: {int(g_pot.sum())}",
         f"count flag_tukey_monthly_daily_potential: {int(m_flag.sum())}",
         f"count combined (Hampel & monthly-daily Tukey): {int(combined.sum())}",
+        f"sum weight_chl_gt (effective mass): {float(out['weight_chl_gt'].sum()):.0f}",
+        f"sum weight_chl_gt_conservative: {float(out['weight_chl_gt_conservative'].sum()):.0f}",
     ]
     (cfg.out_dir / "chl_gt_outlier_summary.txt").write_text("\n".join(summary) + "\n", encoding="utf-8")
 
