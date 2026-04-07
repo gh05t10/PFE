@@ -1,0 +1,4 @@
+Total calendar months in range: 89
+Rule-A(p) eligible months (p=1.0): 22
+Rows in trimmed series: 133,966
+Rows kept (only eligible months): 93,895

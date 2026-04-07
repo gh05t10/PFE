@@ -1,0 +1,8 @@
+Reference: Tukey inner fences Q1-1.5*IQR, Q3+1.5*IQR; outer 3.0*IQR (see s41597-025-04715-4).
+n samples: 133966
+potential outliers (inner): 2152 (1.6064%)
+possible outliers (outer): 542 (0.4046%)
+Q1=1.6 Q3=3.6 IQR=2
+inner: [-1.4, 6.6]
+outer: [-4.4, 9.6]
+mask mode applied to gt export: mask_potential
