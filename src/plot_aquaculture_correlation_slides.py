@@ -1,5 +1,18 @@
+"""
+Ma trận tương quan Pearson / Spearman theo slide 6–7 (Aquaculture report),
+tính **trực tiếp** từ buoy FRDR (BPBuoyData_*_Cleaned.csv), không copy số từ slide.
+
+QC: bỏ quan giá trị khi có cờ B7 / C / M (giống ``chl_shallow_pipeline``).
+
+Chạy:  python -m src.plot_aquaculture_correlation_slides
+
+Ảnh PNG: ``refs/correlation_slide_plots/``
+Tùy chọn: lưu CSV ma trận (``--save-csv``).
+"""
+
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -7,44 +20,24 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+from .chl_shallow_pipeline import EXCLUDE_FLAGS
+
 BASE_DIR = Path(__file__).resolve().parent.parent
-PDF_PATH = BASE_DIR / "refs" / "Aquaculture-report17_1.pdf"
+DATA_DIR = BASE_DIR / "FRDR_dataset_1095"
 OUTPUT_DIR = BASE_DIR / "refs" / "correlation_slide_plots"
 
-# --- Slide 6: Water parameters (Recaps Correlation – Water parameters)
-WATER_LABELS: tuple[str, ...] = (
+# Cột trong CSV (slide 6: nước — tên độ trong là TurbShallow_NTU+ trong FRDR)
+WATER_COLS: tuple[str, ...] = (
     "TempShallow_C",
     "pHShallow",
     "ODOShallow_mg/L",
     "SpCondShallow_uS/cm",
-    "TurbShallow_NTU",
+    "TurbShallow_NTU+",
     "ChlRFUShallow_RFU",
 )
 
-PEARSON_WATER = np.array(
-    [
-        [1.0, 0.39, 0.23, 0.38, -0.094, 0.45],
-        [0.39, 1.0, 0.81, -0.45, -0.14, 0.21],
-        [0.23, 0.81, 1.0, -0.34, -0.15, 0.11],
-        [0.38, -0.45, -0.34, 1.0, 0.24, 0.24],
-        [-0.094, -0.14, -0.15, 0.24, 1.0, 0.55],
-        [0.45, 0.21, 0.11, 0.24, 0.55, 1.0],
-    ]
-)
-
-SPEARMAN_WATER = np.array(
-    [
-        [1.0, 0.34, 0.15, 0.43, 0.19, 0.62],
-        [0.34, 1.0, 0.81, -0.36, 0.45, 0.35],
-        [0.15, 0.81, 1.0, -0.4, 0.21, 0.13],
-        [0.43, -0.36, -0.4, 1.0, 0.085, 0.25],
-        [0.19, 0.45, 0.21, 0.085, 1.0, 0.36],
-        [0.62, 0.35, 0.13, 0.25, 0.36, 1.0],
-    ]
-)
-
-# --- Slide 7: Meteorological (Recaps Correlation – Meteorological)
-MET_LABELS: tuple[str, ...] = (
+# Slide 7: khí tượng + Chl nông
+MET_COLS: tuple[str, ...] = (
     "BarometricPress_kPa",
     "RelativeHum_%",
     "WindSp_km/h",
@@ -53,36 +46,72 @@ MET_LABELS: tuple[str, ...] = (
     "ChlRFUShallow_RFU",
 )
 
-PEARSON_MET = np.array(
-    [
-        [1.0, -0.14, -0.28, -0.21, 0.028, 0.34],
-        [-0.14, 1.0, 0.026, 0.19, -0.61, 0.057],
-        [-0.28, 0.026, 1.0, 0.22, -0.076, -0.098],
-        [-0.21, 0.19, 0.22, 1.0, -0.14, 9.2e-5],
-        [0.028, -0.61, -0.076, -0.14, 1.0, 0.13],
-        [0.34, 0.057, -0.098, 9.2e-5, 0.13, 1.0],
-    ]
-)
 
-SPEARMAN_MET = np.array(
-    [
-        [1.0, -0.14, -0.24, -0.35, 0.051, 0.38],
-        [-0.14, 1.0, 0.0012, 0.22, -0.61, 0.011],
-        [-0.24, 0.0012, 1.0, 0.31, -0.048, -0.17],
-        [-0.35, 0.22, 0.31, 1.0, -0.16, -0.12],
-        [0.051, -0.61, -0.048, -0.16, 1.0, 0.33],
-        [0.38, 0.011, -0.17, -0.12, 0.33, 1.0],
-    ]
-)
+def _display_label(col: str) -> str:
+    """Nhãn hiển thị giống slide (TurbShallow_NTU thay vì TurbShallow_NTU+)."""
+    if col == "TurbShallow_NTU+":
+        return "TurbShallow_NTU"
+    return col
+
+
+def load_frdr_masked(data_dir: Path, cols: tuple[str, ...]) -> pd.DataFrame:
+    """Nối mọi năm Cleaned; mỗi cột chỉ giữ số khi không bị cờ B7/C/M."""
+    paths = sorted(data_dir.glob("BPBuoyData_*_Cleaned.csv"))
+    if not paths:
+        raise FileNotFoundError(f"No BPBuoyData_*_Cleaned.csv under {data_dir}")
+
+    frames: list[pd.DataFrame] = []
+    for p in paths:
+        header = pd.read_csv(p, nrows=0).columns.tolist()
+        flag_cols = [f"{c}_Flag" for c in cols]
+        usecols = ["DateTime"] + [c for c in cols if c in header]
+        usecols += [f for f in flag_cols if f in header]
+        missing = [c for c in cols if c not in header]
+        if missing:
+            raise KeyError(f"{p.name} missing columns: {missing}")
+
+        df = pd.read_csv(p, usecols=usecols, low_memory=False)
+        df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
+        df = df.dropna(subset=["DateTime"])
+
+        block = pd.DataFrame({"DateTime": df["DateTime"]})
+        for col in cols:
+            v = pd.to_numeric(df[col], errors="coerce")
+            fc = f"{col}_Flag"
+            if fc in df.columns:
+                bad = (
+                    df[fc]
+                    .map(lambda x: str(x).strip() if pd.notna(x) else None)
+                    .isin(EXCLUDE_FLAGS)
+                )
+            else:
+                bad = pd.Series(False, index=df.index)
+            block[col] = np.where(~bad.to_numpy() & v.notna().to_numpy(), v, np.nan)
+
+        block["source_file"] = p.name
+        frames.append(block)
+
+    out = pd.concat(frames, ignore_index=True)
+    out = out.sort_values("DateTime").drop_duplicates(subset=["DateTime"], keep="first")
+    return out
+
+
+def correlation_matrices(df: pd.DataFrame, cols: tuple[str, ...]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Pearson và Spearman (pandas: pairwise bỏ NaN theo từng cặp)."""
+    sub = df[list(cols)]
+    pearson = sub.corr(method="pearson", min_periods=1)
+    spearman = sub.corr(method="spearman", min_periods=1)
+    return pearson, spearman
 
 
 def _annot_labels(mat: np.ndarray) -> np.ndarray:
-    """Chuỗi trong ô: 2 chữ số thập phân; giá trị rất nhỏ dùng ký hiệu e."""
     out = np.empty(mat.shape, dtype=object)
     for i in range(mat.shape[0]):
         for j in range(mat.shape[1]):
             v = float(mat[i, j])
-            if abs(v) < 0.01 and v != 0.0:
+            if np.isnan(v):
+                out[i, j] = ""
+            elif abs(v) < 0.01 and v != 0.0:
                 out[i, j] = f"{v:.1e}"
             else:
                 out[i, j] = f"{v:.2f}"
@@ -90,8 +119,8 @@ def _annot_labels(mat: np.ndarray) -> np.ndarray:
 
 
 def _plot_pair(
-    pearson: np.ndarray,
-    spearman: np.ndarray,
+    pearson: pd.DataFrame,
+    spearman: pd.DataFrame,
     labels: tuple[str, ...],
     title_bar: str,
     outfile: Path,
@@ -103,19 +132,22 @@ def _plot_pair(
     vmin, vmax = -1.0, 1.0
     cbar_ticks = np.arange(-1.0, 1.01, 0.25)
 
-    for ax, mat, subt in zip(
+    for ax, mat_df, subt in zip(
         axes,
         (pearson, spearman),
         ("Pearson Correlation (Linear)", "Spearman Correlation (Nonlinear)"),
     ):
-        df = pd.DataFrame(mat, index=labels, columns=labels)
+        mat = mat_df.to_numpy(dtype=float)
+        plot_df = mat_df.copy()
+        plot_df.index = labels
+        plot_df.columns = labels
+
         sns.heatmap(
-            df,
+            plot_df,
             ax=ax,
             cmap=cmap,
             vmin=vmin,
             vmax=vmax,
-            center=None,
             square=True,
             annot=_annot_labels(mat),
             fmt="",
@@ -134,28 +166,77 @@ def _plot_pair(
     plt.close(fig)
 
 
+def _print_summary(name: str, df: pd.DataFrame, cols: tuple[str, ...]) -> None:
+    sub = df[list(cols)]
+    n_rows = len(sub)
+    n_complete = sub.dropna().shape[0]
+    print(f"[{name}] timestamps: {n_rows:,} | rows with all 6 vars non-NaN: {n_complete:,}")
+
+
 def main() -> None:
-    if not PDF_PATH.is_file():
-        print(f"Warning: PDF not found at {PDF_PATH} (matrices are still plotted from embedded constants).")
+    parser = argparse.ArgumentParser(description="Correlation heatmaps from FRDR buoy data.")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=DATA_DIR,
+        help="Folder with BPBuoyData_*_Cleaned.csv (default: FRDR_dataset_1095)",
+    )
+    parser.add_argument(
+        "--save-csv",
+        action="store_true",
+        help=f"Also write pearson/spearman CSVs next to PNGs under {OUTPUT_DIR}",
+    )
+    args = parser.parse_args()
+
+    if not args.data_dir.is_dir():
+        raise FileNotFoundError(args.data_dir)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Water + met share Chl; load union of columns once for efficiency
+    all_cols = tuple(dict.fromkeys(WATER_COLS + MET_COLS))
+    raw = load_frdr_masked(args.data_dir, all_cols)
+
+    water_labels = tuple(_display_label(c) for c in WATER_COLS)
+    met_labels = tuple(_display_label(c) for c in MET_COLS)
+
+    _print_summary("water", raw, WATER_COLS)
+    p_w, s_w = correlation_matrices(raw, WATER_COLS)
+    p_w.index = p_w.columns = water_labels
+    s_w.index = s_w.columns = water_labels
+
+    _print_summary("met", raw, MET_COLS)
+    p_m, s_m = correlation_matrices(raw, MET_COLS)
+    p_m.index = p_m.columns = met_labels
+    s_m.index = s_m.columns = met_labels
+
     _plot_pair(
-        PEARSON_WATER,
-        SPEARMAN_WATER,
-        WATER_LABELS,
-        "Recaps (Correlation – Water parameters)",
+        p_w,
+        s_w,
+        water_labels,
+        "Recaps (Correlation – Water parameters) [FRDR data]",
         OUTPUT_DIR / "page06_water_correlation.png",
     )
     _plot_pair(
-        PEARSON_MET,
-        SPEARMAN_MET,
-        MET_LABELS,
-        "Recaps (Correlation – Meteorological)",
+        p_m,
+        s_m,
+        met_labels,
+        "Recaps (Correlation – Meteorological) [FRDR data]",
         OUTPUT_DIR / "page07_meteorological_correlation.png",
     )
 
-    print(f"Saved:\n  {OUTPUT_DIR / 'page06_water_correlation.png'}\n  {OUTPUT_DIR / 'page07_meteorological_correlation.png'}")
+    if args.save_csv:
+        p_w.to_csv(OUTPUT_DIR / "page06_pearson.csv")
+        s_w.to_csv(OUTPUT_DIR / "page06_spearman.csv")
+        p_m.to_csv(OUTPUT_DIR / "page07_pearson.csv")
+        s_m.to_csv(OUTPUT_DIR / "page07_spearman.csv")
+        print(f"CSV matrices saved under {OUTPUT_DIR}")
+
+    print(
+        "Saved:\n"
+        f"  {OUTPUT_DIR / 'page06_water_correlation.png'}\n"
+        f"  {OUTPUT_DIR / 'page07_meteorological_correlation.png'}"
+    )
 
 
 if __name__ == "__main__":
