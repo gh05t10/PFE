@@ -1,0 +1,8 @@
+resample_freq=10min
+freq_slug=10min
+aggregation=median
+feature_cols=['SpCondShallow_uS/cm', 'ODOShallow_mg/L', 'TempShallow_C', 'pHShallow', 'TurbShallow_NTU+']
+target_col=ChlRFUShallow_RFU
+n_rows=385154
+datetime_min=2014-06-11 22:20:00
+datetime_max=2021-10-07 14:30:00
