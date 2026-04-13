@@ -1,0 +1,4 @@
+input: /home/peter/PFE/processed/chl_shallow/chl_shallow_transformer_gt.csv
+daily rows: 838
+supervision rows: 7302
+horizons (days): (1, 2, 3, 5, 7, 10, 14, 21, 28, 30)
