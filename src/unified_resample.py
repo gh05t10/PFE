@@ -14,9 +14,29 @@ from typing import Literal
 
 import pandas as pd
 
-from .chl_shallow_pipeline import EXCLUDE_FLAGS
+from .chl_shallow_pipeline import EXCLUDE_FLAGS, load_trimmed_chl_frames
+from .chl_rule_a_months import audit_rule_a
 from .resample_config import freq_slug, validate_freq
 from .soft_sensor_columns import FEATURE_COLS, TARGET_COL, flag_columns
+
+
+def filter_rows_to_rule_a_months(df: pd.DataFrame, data_dir: Path, *, p: float = 0.8) -> pd.DataFrame:
+    """
+    Keep only rows whose calendar month passes Rule A(p) on **shallow Chl** coverage.
+
+    Use when soft-sensor training should align with **monthly Chl GT** eligibility
+    (same months as ``chl_shallow_rule_a_timeseries.csv``). Default pipeline keeps
+    all open-water timestamps so **X** remains dense when Chl months are sparse.
+    """
+    ts = load_trimmed_chl_frames(data_dir)
+    audit = audit_rule_a(ts, p=p)
+    passed = audit.loc[audit["rule_a_pass"], ["year", "month"]]
+    good = set(zip(passed["year"], passed["month"]))
+    if not good:
+        return df.iloc[0:0].copy()
+    dt = pd.to_datetime(df["DateTime"], errors="coerce")
+    ok = dt.map(lambda t: (t.year, t.month) in good if pd.notna(t) else False)
+    return df.loc[ok].copy()
 
 
 def _normalize_flag(val: object) -> str | None:
@@ -71,6 +91,8 @@ class UnifiedResampleConfig:
     out_dir: Path
     freq: str
     agg: Literal["median", "mean"] = "median"
+    rule_a: bool = False
+    rule_a_p: float = 0.8
 
 
 def resample_panel(df: pd.DataFrame, *, freq: str, agg: Literal["median", "mean"] = "median") -> pd.DataFrame:
@@ -106,6 +128,8 @@ def run_unified_resample(cfg: UnifiedResampleConfig) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     raw = load_raw_soft_sensor_long(cfg.data_dir)
+    if cfg.rule_a:
+        raw = filter_rows_to_rule_a_months(raw, cfg.data_dir, p=cfg.rule_a_p)
     panel = resample_panel(raw, freq=freq, agg=cfg.agg)
 
     csv_path = out_dir / "soft_sensor_resampled.csv"
@@ -116,6 +140,8 @@ def run_unified_resample(cfg: UnifiedResampleConfig) -> Path:
         f"resample_freq={freq}",
         f"freq_slug={slug}",
         f"aggregation={cfg.agg}",
+        f"rule_a_filter={cfg.rule_a}",
+        f"rule_a_p={cfg.rule_a_p}",
         f"feature_cols={list(FEATURE_COLS)}",
         f"target_col={TARGET_COL}",
         f"n_rows={len(panel)}",
@@ -129,6 +155,7 @@ def run_unified_resample(cfg: UnifiedResampleConfig) -> Path:
 
 __all__ = [
     "UnifiedResampleConfig",
+    "filter_rows_to_rule_a_months",
     "load_raw_soft_sensor_long",
     "resample_panel",
     "run_unified_resample",

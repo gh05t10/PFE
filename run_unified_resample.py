@@ -38,12 +38,31 @@ def main() -> None:
         default=base / "processed" / "chl_shallow",
         help="parent directory; a subfolder resampled_<slug> is created",
     )
+    p.add_argument(
+        "--rule-a",
+        action="store_true",
+        help="keep only timestamps in Rule A(p) months (Chl coverage); aligns with monthly GT",
+    )
+    p.add_argument(
+        "--rule-a-p",
+        type=float,
+        default=0.8,
+        help="Rule A(p) threshold when --rule-a (default 0.8)",
+    )
     args = p.parse_args()
 
     freq = get_resample_freq(cli=args.freq)
     slug = freq_slug(freq)
-    out_dir = args.out_root / f"resampled_{slug}"
-    cfg = UnifiedResampleConfig(data_dir=args.data_dir, out_dir=out_dir, freq=freq, agg=args.agg)
+    suffix = "_ruleA" if args.rule_a else ""
+    out_dir = args.out_root / f"resampled_{slug}{suffix}"
+    cfg = UnifiedResampleConfig(
+        data_dir=args.data_dir,
+        out_dir=out_dir,
+        freq=freq,
+        agg=args.agg,
+        rule_a=args.rule_a,
+        rule_a_p=args.rule_a_p,
+    )
     path = run_unified_resample(cfg)
     print(f"freq={freq} → {path}")
     print(f"meta: {out_dir / 'resample_meta.txt'}")

@@ -28,6 +28,11 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Train-only z-score + time splits for resampled soft-sensor data.")
     p.add_argument("--freq", default=None, help="resample slug folder (default: PFE_RESAMPLE_FREQ or 30min)")
     p.add_argument(
+        "--rule-a",
+        action="store_true",
+        help="use processed/chl_shallow/resampled_<slug>_ruleA/ (from run_unified_resample --rule-a)",
+    )
+    p.add_argument(
         "--input-csv",
         type=Path,
         default=None,
@@ -53,8 +58,11 @@ def main() -> None:
 
     freq = get_resample_freq(cli=args.freq)
     slug = freq_slug(freq)
-    in_csv = args.input_csv or (base / "processed" / "chl_shallow" / f"resampled_{slug}" / "soft_sensor_resampled.csv")
-    out_dir = args.out_dir or (base / "processed" / "chl_shallow" / f"resampled_{slug}" / "normalized_split")
+    ra = "_ruleA" if args.rule_a else ""
+    in_csv = args.input_csv or (
+        base / "processed" / "chl_shallow" / f"resampled_{slug}{ra}" / "soft_sensor_resampled.csv"
+    )
+    out_dir = args.out_dir or (base / "processed" / "chl_shallow" / f"resampled_{slug}{ra}" / "normalized_split")
 
     train_end = pd.Timestamp(args.train_end)
     val_end = pd.Timestamp(args.val_end)

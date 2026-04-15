@@ -24,6 +24,11 @@ def main() -> None:
     p = argparse.ArgumentParser(description="EDA summary for normalized / windowed pipeline outputs.")
     p.add_argument("--freq", default=None)
     p.add_argument(
+        "--rule-a",
+        action="store_true",
+        help="use resampled_<slug>_ruleA/normalized_split",
+    )
+    p.add_argument(
         "--normalized-dir",
         type=Path,
         default=None,
@@ -46,7 +51,10 @@ def main() -> None:
 
     freq = get_resample_freq(cli=args.freq)
     slug = freq_slug(freq)
-    norm_dir = args.normalized_dir or (base / "processed" / "chl_shallow" / f"resampled_{slug}" / "normalized_split")
+    ra = "_ruleA" if args.rule_a else ""
+    norm_dir = args.normalized_dir or (
+        base / "processed" / "chl_shallow" / f"resampled_{slug}{ra}" / "normalized_split"
+    )
     out_dir = args.out_dir or (norm_dir / "eda")
     win_dir = args.windowed_dir
     if win_dir is None:

@@ -23,6 +23,11 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Windowed X/mask/y from normalized split CSVs.")
     p.add_argument("--freq", default=None, help="resample slug (default: env or 30min)")
     p.add_argument(
+        "--rule-a",
+        action="store_true",
+        help="use resampled_<slug>_ruleA/normalized_split",
+    )
+    p.add_argument(
         "--normalized-dir",
         type=Path,
         default=None,
@@ -40,7 +45,10 @@ def main() -> None:
 
     freq = get_resample_freq(cli=args.freq)
     slug = freq_slug(freq)
-    norm_dir = args.normalized_dir or (base / "processed" / "chl_shallow" / f"resampled_{slug}" / "normalized_split")
+    ra = "_ruleA" if args.rule_a else ""
+    norm_dir = args.normalized_dir or (
+        base / "processed" / "chl_shallow" / f"resampled_{slug}{ra}" / "normalized_split"
+    )
     if not norm_dir.is_dir():
         raise SystemExit(f"Missing normalized split dir: {norm_dir}")
 
