@@ -1,0 +1,38 @@
+{
+  "method": "standard_per_channel",
+  "features": {
+    "SpCondShallow_uS/cm": {
+      "mean": 776.2992019053986,
+      "std": 132.69651002558996
+    },
+    "ODOShallow_mg/L": {
+      "mean": 9.386745816476646,
+      "std": 2.0148950798188747
+    },
+    "TempShallow_C": {
+      "mean": 19.781204866724703,
+      "std": 3.160534164585357
+    },
+    "pHShallow": {
+      "mean": 8.532668200472578,
+      "std": 0.2755899699581717
+    },
+    "TurbShallow_NTU+": {
+      "mean": 9.524489488843988,
+      "std": 8.341181999151816
+    }
+  },
+  "target": {
+    "name": "ChlRFUShallow_RFU",
+    "mean": 3.1244974188945314,
+    "std": 1.4908276499108404
+  },
+  "split": {
+    "train": "DateTime < 2019-01-01T00:00:00",
+    "val": "2019-01-01T00:00:00 <= DateTime < 2021-01-01T00:00:00",
+    "test": "DateTime >= 2021-01-01T00:00:00"
+  },
+  "train_end": "2019-01-01T00:00:00",
+  "val_end": "2021-01-01T00:00:00",
+  "resample_freq": "30min"
+}
