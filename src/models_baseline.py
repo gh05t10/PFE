@@ -46,8 +46,8 @@ class GRUBaseline(nn.Module):
         x: (B, L, C), x_mask: (B, L, C) True=valid.
         Returns y_pred_z: (B,)
         """
-        # Zero out invalid positions; GRU will see zeros there.
-        x_valid = x * x_mask.float()
+        # Invalid positions must be 0 without multiplying NaN*0 (PyTorch keeps NaN).
+        x_valid = torch.where(x_mask, x, torch.zeros_like(x))
         out, h_n = self.gru(x_valid)
         # Use last hidden state from top layer
         last_h = h_n[-1]  # (B, hidden_dim)
