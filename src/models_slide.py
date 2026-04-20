@@ -60,10 +60,29 @@ class SlidePatchCrossAttn(nn.Module):
         if L % patch_len != 0:
             raise ValueError(f"L={L} not divisible by patch_len={patch_len}")
         P = L // patch_len
-        x = torch.where(mask, x, torch.zeros_like(x))
+        # mask True but value NaN/Inf still poisons Transformer — zero those out
+        ok = mask & torch.isfinite(x)
+        x = torch.where(ok, x, torch.zeros_like(x))
         x = x.view(B, P, patch_len, C).reshape(B, P, patch_len * C)
-        m = mask.view(B, P, patch_len, C).float().mean(dim=(2, 3)) > 0.5
+        # At least one valid timestep×channel in the patch (not ">50% valid")
+        m = mask.view(B, P, patch_len, C).any(dim=(2, 3))
         return x, m
+
+    @staticmethod
+    def _no_all_masked(pad: torch.Tensor) -> torch.Tensor:
+        """
+        Transformer / MHA: if every position is padding (all True), softmax can become NaN.
+        Unmask one slot per row that was fully masked.
+        ``pad``: True = ignore (PyTorch convention for key_padding / src_key_padding).
+        """
+        if not pad.any():
+            return pad
+        all_bad = pad.all(dim=1)
+        if not all_bad.any():
+            return pad
+        out = pad.clone()
+        out[all_bad, -1] = False
+        return out
 
     def forward(
         self,
@@ -79,15 +98,16 @@ class SlidePatchCrossAttn(nn.Module):
         pl = self.cfg.patch_len
         x5p, v5 = self._fold(x5, mask5, pl)
         x6p, v6 = self._fold(x6, mask6, pl)
-        pad5 = ~v5
-        pad6 = ~v6
+        pad5 = self._no_all_masked(~v5)
+        pad6 = self._no_all_masked(~v6)
 
         h5 = self.embed5(x5p)
         h6 = self.embed6(x6p)
         h5 = self.enc5(h5, src_key_padding_mask=pad5)
         h6 = self.enc6(h6, src_key_padding_mask=pad6)
 
-        attn_out, _ = self.cross(h5, h6, h6, key_padding_mask=pad6)
+        pad6_k = self._no_all_masked(pad6)
+        attn_out, _ = self.cross(h5, h6, h6, key_padding_mask=pad6_k)
         out = self.norm(attn_out + h5)
         pooled = out.mean(dim=1)
         return self.head(pooled).squeeze(-1)
