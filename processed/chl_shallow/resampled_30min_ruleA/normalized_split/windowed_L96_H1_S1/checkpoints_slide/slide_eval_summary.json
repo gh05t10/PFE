@@ -1,0 +1,9 @@
+{
+  "best_epoch": 18,
+  "val_rmse_chl": 0.9415689706802368,
+  "val_mae_chl": 0.63808673620224,
+  "test_rmse_chl": 1.1630218029022217,
+  "test_mae_chl": 1.019693374633789,
+  "checkpoint": "/home/peter/PFE/processed/chl_shallow/resampled_30min_ruleA/normalized_split/windowed_L96_H1_S1/checkpoints_slide/best_slide.pt",
+  "stopped_reason": "early_stopping_8"
+}
