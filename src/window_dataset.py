@@ -79,6 +79,8 @@ def _build_one_split(
     X_mask = np.zeros((n_samples, L, len(FEATURE_COLS)), dtype=np.bool_)
     y_z = np.full((n_samples,), np.nan, dtype=np.float32)
     y_mask = np.ones((n_samples,), dtype=np.bool_)
+    # Chl_z at the last timestep of the input window (for persistence baseline vs one-step-ahead target).
+    chl_z_at_window_end = np.full((n_samples,), np.nan, dtype=np.float32)
     context_end = np.empty(n_samples, dtype="datetime64[ns]")
     target_time = np.empty(n_samples, dtype="datetime64[ns]")
 
@@ -93,6 +95,8 @@ def _build_one_split(
         y_z[k] = float(yv) if np.isfinite(yv) else np.nan
         if not np.isfinite(yv):
             y_mask[k] = False
+        end_chl = df[yz].iloc[i + L - 1]
+        chl_z_at_window_end[k] = float(end_chl) if np.isfinite(end_chl) else np.nan
         context_end[k] = np.datetime64(dt.iloc[i + L - 1])
         target_time[k] = np.datetime64(dt.iloc[tgt])
 
@@ -101,6 +105,7 @@ def _build_one_split(
         "X_mask": X_mask,
         "y_z": y_z,
         "y_mask": y_mask,
+        "chl_z_at_window_end": chl_z_at_window_end,
         "context_end_time": context_end,
         "target_time": target_time,
     }
