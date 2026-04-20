@@ -44,5 +44,41 @@ class WindowNPZDataset(Dataset):
         }
 
 
-__all__ = ["WindowNPZDataset"]
+class SlideWindowNPZDataset(Dataset):
+    """
+    Same as ``WindowNPZDataset`` plus ``X6_z`` / ``X6_mask`` for the calibration branch (slide 10).
+
+    Requires NPZ built after ``window_dataset`` includes ``X6_z`` — re-run ``run_build_window_dataset.py``.
+    """
+
+    def __init__(self, npz_path: str | Path) -> None:
+        super().__init__()
+        self.path = Path(npz_path)
+        data = np.load(self.path, allow_pickle=False)
+        if "X6_z" not in data.files:
+            raise KeyError(
+                f"{npz_path} has no X6_z — rebuild windows with the current run_build_window_dataset.py"
+            )
+        self.X = torch.from_numpy(data["X_z"]).float()
+        self.X_mask = torch.from_numpy(data["X_mask"]).bool()
+        self.X6 = torch.from_numpy(data["X6_z"]).float()
+        self.X6_mask = torch.from_numpy(data["X6_mask"]).bool()
+        self.y = torch.from_numpy(data["y_z"]).float()
+        self.y_mask = torch.from_numpy(data["y_mask"]).bool()
+
+    def __len__(self) -> int:
+        return self.X.shape[0]
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        return {
+            "x": self.X[idx],
+            "x_mask": self.X_mask[idx],
+            "x6": self.X6[idx],
+            "x6_mask": self.X6_mask[idx],
+            "y": self.y[idx],
+            "y_mask": self.y_mask[idx],
+        }
+
+
+__all__ = ["WindowNPZDataset", "SlideWindowNPZDataset"]
 

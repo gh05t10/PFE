@@ -77,6 +77,9 @@ def _build_one_split(
     L = context_len
     X_z = np.full((n_samples, L, len(FEATURE_COLS)), np.nan, dtype=np.float32)
     X_mask = np.zeros((n_samples, L, len(FEATURE_COLS)), dtype=np.bool_)
+    # Slide 10: calibration branch = 5 features + Chl_z at each timestep in the window (training / teacher).
+    X6_z = np.full((n_samples, L, 6), np.nan, dtype=np.float32)
+    X6_mask = np.zeros((n_samples, L, 6), dtype=np.bool_)
     y_z = np.full((n_samples,), np.nan, dtype=np.float32)
     y_mask = np.ones((n_samples,), dtype=np.bool_)
     # Chl_z at the last timestep of the input window (for persistence baseline vs one-step-ahead target).
@@ -90,6 +93,12 @@ def _build_one_split(
         X_z[k] = xz.astype(np.float32)
         fin = np.isfinite(xz)
         X_mask[k] = fin
+        chl_seq = sl[yz].to_numpy(dtype=np.float64, copy=False)
+        X6_z[k, :, :5] = xz.astype(np.float32)
+        X6_z[k, :, 5] = chl_seq.astype(np.float32)
+        chl_ok = np.isfinite(chl_seq)
+        X6_mask[k, :, :5] = fin
+        X6_mask[k, :, 5] = chl_ok
         tgt = i + L - 1 + horizon_steps
         yv = df[yz].iloc[tgt]
         y_z[k] = float(yv) if np.isfinite(yv) else np.nan
@@ -103,6 +112,8 @@ def _build_one_split(
     return {
         "X_z": X_z,
         "X_mask": X_mask,
+        "X6_z": X6_z,
+        "X6_mask": X6_mask,
         "y_z": y_z,
         "y_mask": y_mask,
         "chl_z_at_window_end": chl_z_at_window_end,
@@ -137,6 +148,7 @@ def build_windows_to_npz(cfg: WindowDatasetConfig, manifest_extra: dict[str, Any
         "target_col_z": target_z_name(),
         "skip_nan_target": cfg.skip_nan_target,
         "shape_X_z": list(arrs["X_z"].shape),
+        "shape_X6_z": list(arrs["X6_z"].shape),
     }
     meta_path = cfg.out_npz.with_suffix(".json")
     meta_path.write_text(json.dumps(man, indent=2), encoding="utf-8")
