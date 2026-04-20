@@ -22,6 +22,7 @@ from src.datasets import WindowNPZDataset
 from src.eval_baselines import run_all_baselines
 from src.models_baseline import GRUBaseline, GRUBaselineConfig
 from src.resample_config import freq_slug, get_resample_freq
+from src.window_pick import pick_window_dir
 
 
 def inverse_target_from_json(z: np.ndarray, scaler_json: Path) -> np.ndarray:
@@ -98,11 +99,11 @@ def main() -> None:
     ra = "_ruleA" if args.rule_a else ""
     norm_dir = base / "processed" / "chl_shallow" / f"resampled_{slug}{ra}" / "normalized_split"
     if args.window_dir is None:
-        # pick the last windowed_* directory if many exist
-        cand = sorted(norm_dir.glob("windowed_L*_H*_S*"))
-        if not cand:
-            raise SystemExit(f"No windowed_* dir under {norm_dir}; run run_build_window_dataset.py first.")
-        window_dir = cand[-1]
+        # Prefer smallest stride (S1 over S48) when multiple dirs exist
+        try:
+            window_dir = pick_window_dir(norm_dir)
+        except FileNotFoundError:
+            raise SystemExit(f"No windowed_* dir under {norm_dir}; run run_build_window_dataset.py first.") from None
     else:
         window_dir = args.window_dir
 

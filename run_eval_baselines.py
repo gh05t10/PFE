@@ -16,6 +16,7 @@ from pathlib import Path
 
 from src.eval_baselines import run_all_baselines
 from src.resample_config import freq_slug, get_resample_freq
+from src.window_pick import pick_window_dir
 
 
 def main() -> None:
@@ -31,10 +32,10 @@ def main() -> None:
     ra = "_ruleA" if args.rule_a else ""
     norm_dir = base / "processed" / "chl_shallow" / f"resampled_{slug}{ra}" / "normalized_split"
     if args.window_dir is None:
-        cand = sorted(norm_dir.glob("windowed_L*_H*_S*"))
-        if not cand:
-            raise SystemExit(f"No windowed_* under {norm_dir}")
-        window_dir = cand[-1]
+        try:
+            window_dir = pick_window_dir(norm_dir)
+        except FileNotFoundError:
+            raise SystemExit(f"No windowed_* under {norm_dir}") from None
     else:
         window_dir = args.window_dir
 

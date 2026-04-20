@@ -17,6 +17,7 @@ from pathlib import Path
 
 from src.eda_report import run_full_eda
 from src.resample_config import freq_slug, get_resample_freq
+from src.window_pick import pick_window_dir
 
 
 def main() -> None:
@@ -58,11 +59,10 @@ def main() -> None:
     out_dir = args.out_dir or (norm_dir / "eda")
     win_dir = args.windowed_dir
     if win_dir is None:
-        cand = sorted(norm_dir.glob("windowed_L*_H*_S*"))
-        if len(cand) == 1:
-            win_dir = cand[0]
-        elif len(cand) > 1:
-            win_dir = cand[-1]
+        try:
+            win_dir = pick_window_dir(norm_dir)
+        except FileNotFoundError:
+            win_dir = None
 
     run_full_eda(norm_dir, win_dir, out_dir, with_plots=args.plots)
     print(f"EDA written to {out_dir}")
