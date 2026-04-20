@@ -23,5 +23,9 @@
       "mean_y_valid": 1.0
     }
   },
-  "figures_chl_z": []
+  "figures_chl_z": [
+    "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/eda/figures/hist_train_chl_z.png",
+    "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/eda/figures/hist_val_chl_z.png",
+    "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/eda/figures/hist_test_chl_z.png"
+  ]
 }

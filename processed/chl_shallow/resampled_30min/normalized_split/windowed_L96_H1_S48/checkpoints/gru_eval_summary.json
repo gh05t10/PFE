@@ -1,0 +1,8 @@
+{
+  "best_epoch": 3,
+  "val_rmse_chl": 1.6476788520812988,
+  "val_mae_chl": 1.2691713571548462,
+  "test_rmse_chl": 2.45816707611084,
+  "test_mae_chl": 2.3960611820220947,
+  "checkpoint": "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/windowed_L96_H1_S48/checkpoints/best_gru.pt"
+}

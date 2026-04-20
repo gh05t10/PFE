@@ -1,0 +1,33 @@
+{
+  "scaler_json": "/home/peter/PFE/processed/chl_shallow/resampled_30min_ruleA/normalized_split/scaler_params.json",
+  "val": {
+    "mean_train": {
+      "rmse": 2.003560659570246,
+      "mae": 1.429393374218081,
+      "n": 9880,
+      "method": "mean_train_z",
+      "mean_z_used": -0.0036942473662606103
+    },
+    "persistence": {
+      "rmse": 0.2549873082581407,
+      "mae": 0.12312182520952672,
+      "n": 9850,
+      "method": "persistence_window_end"
+    }
+  },
+  "test": {
+    "mean_train": {
+      "rmse": 1.9337496666171083,
+      "mae": 1.8097983564456144,
+      "n": 5648,
+      "method": "mean_train_z",
+      "mean_z_used": -0.0036942473662606103
+    },
+    "persistence": {
+      "rmse": 0.13149004422771068,
+      "mae": 0.07966447451434479,
+      "n": 5633,
+      "method": "persistence_window_end"
+    }
+  }
+}
