@@ -65,12 +65,15 @@ class SlideWindowNPZDataset(Dataset):
         self.X6_mask = torch.from_numpy(data["X6_mask"]).bool()
         self.y = torch.from_numpy(data["y_z"]).float()
         self.y_mask = torch.from_numpy(data["y_mask"]).bool()
+        # Keep times as numpy datetime64 arrays (torch has no native datetime dtype).
+        self.context_end_time = data["context_end_time"] if "context_end_time" in data.files else None
+        self.target_time = data["target_time"] if "target_time" in data.files else None
 
     def __len__(self) -> int:
         return self.X.shape[0]
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        return {
+        out: dict[str, object] = {
             "x": self.X[idx],
             "x_mask": self.X_mask[idx],
             "x6": self.X6[idx],
@@ -78,6 +81,11 @@ class SlideWindowNPZDataset(Dataset):
             "y": self.y[idx],
             "y_mask": self.y_mask[idx],
         }
+        if self.context_end_time is not None:
+            out["context_end_time"] = self.context_end_time[idx]
+        if self.target_time is not None:
+            out["target_time"] = self.target_time[idx]
+        return out  # type: ignore[return-value]
 
 
 __all__ = ["WindowNPZDataset", "SlideWindowNPZDataset"]

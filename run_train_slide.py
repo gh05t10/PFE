@@ -35,6 +35,54 @@ def inverse_target_from_json(z: np.ndarray, scaler_json: Path) -> np.ndarray:
     return z * std + mu
 
 
+def collect_valid_preds(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+    """
+    Return (y_z_valid, pred_z_valid, context_end_time_valid, target_time_valid) concatenated over the loader.
+    Only includes samples where y_mask is true and y is finite.
+    """
+    model.eval()
+    ys: list[np.ndarray] = []
+    ps: list[np.ndarray] = []
+    cts: list[np.ndarray] = []
+    tts: list[np.ndarray] = []
+    have_times: bool | None = None
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["x"].to(device)
+            x_mask = batch["x_mask"].to(device)
+            x6 = batch["x6"].to(device)
+            x6_mask = batch["x6_mask"].to(device)
+            y = batch["y"].to(device)
+            y_mask = batch["y_mask"].to(device)
+
+            valid = y_mask & torch.isfinite(y)
+            if valid.sum() == 0:
+                continue
+            pred = model(x, x_mask, x6, x6_mask)
+            ys.append(y[valid].detach().cpu().numpy())
+            ps.append(pred[valid].detach().cpu().numpy())
+            if have_times is None:
+                have_times = ("context_end_time" in batch) and ("target_time" in batch)
+            if have_times:
+                # Times are numpy datetime64 scalars/arrays; keep them on CPU.
+                v_np = valid.detach().cpu().numpy().astype(bool)
+                cts.append(np.asarray(batch["context_end_time"])[v_np])
+                tts.append(np.asarray(batch["target_time"])[v_np])
+
+    if not ys:
+        return np.array([], dtype=np.float32), np.array([], dtype=np.float32), None, None
+
+    y_all = np.concatenate(ys)
+    p_all = np.concatenate(ps)
+    if have_times:
+        return y_all, p_all, np.concatenate(cts), np.concatenate(tts)
+    return y_all, p_all, None, None
+
+
 def eval_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -101,6 +149,11 @@ def main() -> None:
     p.add_argument("--checkpoint-dir", type=Path, default=None)
     p.add_argument("--skip-baselines", action="store_true")
     p.add_argument("--log-csv", type=Path, default=None)
+    p.add_argument(
+        "--save-preds",
+        action="store_true",
+        help="save y_true/y_pred arrays (valid samples only) for best checkpoint to checkpoints_slide/preds_{val,test}.npz",
+    )
     args = p.parse_args()
 
     set_seed(args.seed, deterministic=args.deterministic)
@@ -320,6 +373,38 @@ def main() -> None:
         print(
             f"Test (best val): RMSE_Chl={test_m['rmse']:.4f}, MAE_Chl={test_m['mae']:.4f} → {ckpt_dir / 'slide_eval_summary.json'}"
         )
+
+        if args.save_preds:
+            # Save valid-only arrays to keep file small & avoid ambiguity about masked targets.
+            yv_z, pv_z, yv_ct, yv_tt = collect_valid_preds(model, val_loader, device)
+            yt_z, pt_z, yt_ct, yt_tt = collect_valid_preds(model, test_loader, device)
+
+            yv_rf = inverse_target_from_json(yv_z, scaler_json)
+            pv_rf = inverse_target_from_json(pv_z, scaler_json)
+            yt_rf = inverse_target_from_json(yt_z, scaler_json)
+            pt_rf = inverse_target_from_json(pt_z, scaler_json)
+
+            np.savez_compressed(
+                ckpt_dir / "preds_val.npz",
+                y_true_z=yv_z,
+                y_pred_z=pv_z,
+                y_true_rf=yv_rf,
+                y_pred_rf=pv_rf,
+                n_valid=int(yv_z.size),
+                context_end_time=yv_ct if yv_ct is not None else np.array([], dtype="datetime64[ns]"),
+                target_time=yv_tt if yv_tt is not None else np.array([], dtype="datetime64[ns]"),
+            )
+            np.savez_compressed(
+                ckpt_dir / "preds_test.npz",
+                y_true_z=yt_z,
+                y_pred_z=pt_z,
+                y_true_rf=yt_rf,
+                y_pred_rf=pt_rf,
+                n_valid=int(yt_z.size),
+                context_end_time=yt_ct if yt_ct is not None else np.array([], dtype="datetime64[ns]"),
+                target_time=yt_tt if yt_tt is not None else np.array([], dtype="datetime64[ns]"),
+            )
+            print(f"Saved preds: {ckpt_dir / 'preds_val.npz'} and {ckpt_dir / 'preds_test.npz'}")
 
 
 if __name__ == "__main__":
