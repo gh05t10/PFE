@@ -66,12 +66,12 @@ def collect_valid_preds(
             ys.append(y[valid].detach().cpu().numpy())
             ps.append(pred[valid].detach().cpu().numpy())
             if have_times is None:
-                have_times = ("context_end_time" in batch) and ("target_time" in batch)
+                have_times = ("context_end_time_ns" in batch) and ("target_time_ns" in batch)
             if have_times:
                 # Times are numpy datetime64 scalars/arrays; keep them on CPU.
                 v_np = valid.detach().cpu().numpy().astype(bool)
-                cts.append(np.asarray(batch["context_end_time"])[v_np])
-                tts.append(np.asarray(batch["target_time"])[v_np])
+                cts.append(np.asarray(batch["context_end_time_ns"])[v_np].astype(np.int64))
+                tts.append(np.asarray(batch["target_time_ns"])[v_np].astype(np.int64))
 
     if not ys:
         return np.array([], dtype=np.float32), np.array([], dtype=np.float32), None, None
@@ -391,8 +391,12 @@ def main() -> None:
                 y_true_rf=yv_rf,
                 y_pred_rf=pv_rf,
                 n_valid=int(yv_z.size),
-                context_end_time=yv_ct if yv_ct is not None else np.array([], dtype="datetime64[ns]"),
-                target_time=yv_tt if yv_tt is not None else np.array([], dtype="datetime64[ns]"),
+                context_end_time=(
+                    yv_ct.astype("datetime64[ns]") if yv_ct is not None else np.array([], dtype="datetime64[ns]")
+                ),
+                target_time=(
+                    yv_tt.astype("datetime64[ns]") if yv_tt is not None else np.array([], dtype="datetime64[ns]")
+                ),
             )
             np.savez_compressed(
                 ckpt_dir / "preds_test.npz",
@@ -401,8 +405,12 @@ def main() -> None:
                 y_true_rf=yt_rf,
                 y_pred_rf=pt_rf,
                 n_valid=int(yt_z.size),
-                context_end_time=yt_ct if yt_ct is not None else np.array([], dtype="datetime64[ns]"),
-                target_time=yt_tt if yt_tt is not None else np.array([], dtype="datetime64[ns]"),
+                context_end_time=(
+                    yt_ct.astype("datetime64[ns]") if yt_ct is not None else np.array([], dtype="datetime64[ns]")
+                ),
+                target_time=(
+                    yt_tt.astype("datetime64[ns]") if yt_tt is not None else np.array([], dtype="datetime64[ns]")
+                ),
             )
             print(f"Saved preds: {ckpt_dir / 'preds_val.npz'} and {ckpt_dir / 'preds_test.npz'}")
 
