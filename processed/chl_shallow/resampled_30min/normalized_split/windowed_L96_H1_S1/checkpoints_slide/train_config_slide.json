@@ -29,6 +29,7 @@
     "pin_memory": false,
     "checkpoint_dir": null,
     "skip_baselines": false,
-    "log_csv": null
+    "log_csv": null,
+    "save_preds": true
   }
 }

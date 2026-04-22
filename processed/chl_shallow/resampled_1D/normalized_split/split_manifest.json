@@ -1,0 +1,26 @@
+{
+  "input_csv": "/home/peter/PFE/processed/chl_shallow/resampled_1D/soft_sensor_resampled.csv",
+  "resample_freq": "1D",
+  "resample_slug": "1D",
+  "split_rule": {
+    "train": "DateTime < 2019-01-01T00:00:00",
+    "val": "2019-01-01T00:00:00 <= DateTime < 2021-01-01T00:00:00",
+    "test": "DateTime >= 2021-01-01T00:00:00"
+  },
+  "train_end": "2019-01-01T00:00:00",
+  "val_end": "2021-01-01T00:00:00",
+  "n_rows": {
+    "train": 1664,
+    "val": 731,
+    "test": 281
+  },
+  "feature_cols": [
+    "SpCondShallow_uS/cm",
+    "ODOShallow_mg/L",
+    "TempShallow_C",
+    "pHShallow",
+    "TurbShallow_NTU+"
+  ],
+  "target_col": "ChlRFUShallow_RFU",
+  "z_suffix": "_z"
+}
