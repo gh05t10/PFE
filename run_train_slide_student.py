@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""
+Train Setup-B student model (deployable): inference uses only 5 soft-sensor channels.
+
+Student is trained with distillation from a teacher SlidePatchCrossAttn checkpoint:
+  - supervised loss: MSE(student_pred_z, y_z)
+  - distill loss:    MSE(student_pred_z, teacher_pred_z.detach())
+
+Both losses are computed on valid targets only (y_mask & finite).
+Metrics are reported in RFU via scaler_params.json (same as other scripts).
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+
+from src.datasets import SlideWindowNPZDataset
+from src.eval_baselines import run_all_baselines
+from src.models_slide import SlidePatchCrossAttn, SlidePatchCrossAttnConfig, SlideStudentCrossAttn
+from src.resample_config import freq_slug, get_resample_freq
+from src.train_utils import set_seed
+from src.window_pick import pick_window_dir
+
+
+def inverse_target_from_json(z: np.ndarray, scaler_json: Path) -> np.ndarray:
+    d = json.loads(Path(scaler_json).read_text(encoding="utf-8"))
+    mu = float(d["target"]["mean"])
+    std = float(d["target"]["std"])
+    return z * std + mu
+
+
+@torch.no_grad()
+def eval_epoch_student(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    scaler_json: Path,
+) -> dict[str, float]:
+    model.eval()
+    se = []
+    ae = []
+    for batch in loader:
+        x = batch["x"].to(device)
+        x_mask = batch["x_mask"].to(device)
+        y = batch["y"].to(device)
+        y_mask = batch["y_mask"].to(device)
+
+        valid = y_mask & torch.isfinite(y)
+        if valid.sum() == 0:
+            continue
+        yv = y[valid]
+        pv = model(x, x_mask)[valid]
+
+        y_np = yv.detach().cpu().numpy()
+        p_np = pv.detach().cpu().numpy()
+        y_raw = inverse_target_from_json(y_np, scaler_json)
+        p_raw = inverse_target_from_json(p_np, scaler_json)
+        se.append((p_raw - y_raw) ** 2)
+        ae.append(np.abs(p_raw - y_raw))
+
+    if not se:
+        return {"rmse": float("nan"), "mae": float("nan")}
+    se_all = np.concatenate(se)
+    ae_all = np.concatenate(ae)
+    return {"rmse": float(np.sqrt(se_all.mean())), "mae": float(ae_all.mean())}
+
+
+def load_teacher(ckpt_path: Path, device: torch.device) -> SlidePatchCrossAttn:
+    ckpt = torch.load(ckpt_path, map_location=device)
+    mcfg_d = ckpt.get("model_config") or {}
+    cfg = SlidePatchCrossAttnConfig(
+        patch_len=int(mcfg_d.get("patch_len", 16)),
+        d_model=int(mcfg_d.get("d_model", 64)),
+        nhead=int(mcfg_d.get("nhead", 4)),
+        encoder_layers=int(mcfg_d.get("encoder_layers", 2)),
+        dropout=0.1,
+    )
+    model = SlidePatchCrossAttn(cfg).to(device)
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+    return model
+
+
+def main() -> None:
+    base = Path(__file__).resolve().parent
+    p = argparse.ArgumentParser(description="Train Setup-B student (X5 only) with teacher distillation.")
+    p.add_argument("--freq", default=None)
+    p.add_argument("--rule-a", action="store_true")
+    p.add_argument("--window-dir", type=Path, default=None)
+    p.add_argument("--teacher-ckpt", type=Path, required=True, help="Path to teacher best_slide.pt")
+    p.add_argument("--patch-len", type=int, default=16)
+    p.add_argument("--d-model", type=int, default=64)
+    p.add_argument("--nhead", type=int, default=4)
+    p.add_argument("--encoder-layers", type=int, default=2)
+    p.add_argument("--kv-encoder-layers", type=int, default=None)
+    p.add_argument("--share-q-kv-encoder", action="store_true")
+    p.add_argument("--epochs", type=int, default=30)
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--lr", type=float, default=5e-4)
+    p.add_argument("--weight-decay", type=float, default=1e-4)
+    p.add_argument("--grad-clip", type=float, default=1.0)
+    p.add_argument("--scheduler", choices=("none", "plateau", "cosine"), default="plateau")
+    p.add_argument("--plateau-patience", type=int, default=2)
+    p.add_argument("--plateau-factor", type=float, default=0.5)
+    p.add_argument("--min-lr", type=float, default=1e-6)
+    p.add_argument("--early-stopping-patience", type=int, default=8)
+    p.add_argument("--early-stopping-min-delta", type=float, default=1e-4)
+    p.add_argument(
+        "--alpha-supervised",
+        type=float,
+        default=0.5,
+        help="loss = alpha*MSE(y) + (1-alpha)*MSE(teacher); alpha in [0,1]",
+    )
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--deterministic", action="store_true")
+    p.add_argument("--num-workers", type=int, default=0)
+    p.add_argument("--pin-memory", action="store_true")
+    p.add_argument("--checkpoint-dir", type=Path, default=None)
+    p.add_argument("--skip-baselines", action="store_true")
+    p.add_argument("--log-csv", type=Path, default=None)
+    args = p.parse_args()
+
+    if not (0.0 <= args.alpha_supervised <= 1.0):
+        raise SystemExit("--alpha-supervised must be in [0, 1]")
+
+    set_seed(args.seed, deterministic=args.deterministic)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    freq = get_resample_freq(cli=args.freq)
+    slug = freq_slug(freq)
+    ra = "_ruleA" if args.rule_a else ""
+    norm_dir = base / "processed" / "chl_shallow" / f"resampled_{slug}{ra}" / "normalized_split"
+    if args.window_dir is None:
+        try:
+            window_dir = pick_window_dir(norm_dir)
+        except FileNotFoundError:
+            raise SystemExit(f"No windowed_* under {norm_dir}") from None
+    else:
+        window_dir = args.window_dir
+
+    train_npz = window_dir / "train.npz"
+    val_npz = window_dir / "val.npz"
+    test_npz = window_dir / "test.npz"
+    scaler_json = norm_dir / "scaler_params.json"
+    for f in (train_npz, val_npz, scaler_json, args.teacher_ckpt):
+        if not f.is_file():
+            raise SystemExit(f"Missing {f}")
+
+    # Optional baseline metrics on same windows.
+    if not args.skip_baselines:
+        bl = run_all_baselines(train_npz, val_npz, test_npz if test_npz.is_file() else None, scaler_json)
+        bl_path = window_dir / "baseline_metrics.json"
+        if not bl_path.is_file():
+            bl_path.write_text(json.dumps(bl, indent=2, default=str), encoding="utf-8")
+        print("=== Naive baselines (RFU) ===")
+        print(json.dumps(bl, indent=2, default=str))
+        print(f"(saved {bl_path})\n")
+
+    # Data
+    pin = bool(args.pin_memory and device.type == "cuda")
+    train_ds = SlideWindowNPZDataset(train_npz)
+    val_ds = SlideWindowNPZDataset(val_npz)
+    test_ds = SlideWindowNPZDataset(test_npz) if test_npz.is_file() else None
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=pin)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=pin)
+    test_loader = (
+        DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=pin)
+        if test_ds is not None
+        else None
+    )
+
+    # Teacher (frozen)
+    teacher = load_teacher(args.teacher_ckpt, device)
+
+    # Student
+    tmp = np.load(train_npz, allow_pickle=False)
+    L = int(tmp["X_z"].shape[1])
+    if L % args.patch_len != 0:
+        raise SystemExit(f"context_len L={L} not divisible by --patch-len={args.patch_len}")
+
+    scfg = SlidePatchCrossAttnConfig(
+        patch_len=args.patch_len,
+        d_model=args.d_model,
+        nhead=args.nhead,
+        encoder_layers=args.encoder_layers,
+        kv_encoder_layers=args.kv_encoder_layers,
+        share_q_kv_encoder=bool(args.share_q_kv_encoder),
+        dropout=0.1,
+    )
+    student = SlideStudentCrossAttn(scfg).to(device)
+
+    opt = torch.optim.AdamW(student.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    loss_fn = nn.MSELoss()
+
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
+    if args.scheduler == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, mode="min", factor=args.plateau_factor, patience=args.plateau_patience, min_lr=args.min_lr
+        )
+    elif args.scheduler == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs, eta_min=args.min_lr)
+
+    ckpt_dir = args.checkpoint_dir or (window_dir / "checkpoints_slide_student")
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    best_path = ckpt_dir / "best_student.pt"
+    log_csv = args.log_csv or (ckpt_dir / "metrics_student.csv")
+
+    best_val_rmse = float("inf")
+    best_val_mae = float("nan")
+    best_epoch = 0
+    epochs_no_improve = 0
+    stopped_reason = "max_epochs"
+
+    with open(log_csv, "w", newline="", encoding="utf-8") as fcsv:
+        w = csv.DictWriter(
+            fcsv,
+            fieldnames=["epoch", "train_loss", "train_loss_sup", "train_loss_distill", "val_rmse_chl", "val_mae_chl", "lr", "seconds"],
+        )
+        w.writeheader()
+
+        for epoch in range(1, args.epochs + 1):
+            t0 = time.perf_counter()
+            student.train()
+            total = 0.0
+            total_sup = 0.0
+            total_dst = 0.0
+            n_batches = 0
+
+            for batch in train_loader:
+                x = batch["x"].to(device)
+                x_mask = batch["x_mask"].to(device)
+                x6 = batch["x6"].to(device)
+                x6_mask = batch["x6_mask"].to(device)
+                y = batch["y"].to(device)
+                y_mask = batch["y_mask"].to(device)
+
+                valid = y_mask & torch.isfinite(y)
+                if valid.sum() == 0:
+                    continue
+
+                opt.zero_grad()
+                pred_s = student(x, x_mask)
+                with torch.no_grad():
+                    pred_t = teacher(x, x_mask, x6, x6_mask)
+
+                sup = loss_fn(pred_s[valid], y[valid])
+                dst = loss_fn(pred_s[valid], pred_t[valid].detach())
+                loss = args.alpha_supervised * sup + (1.0 - args.alpha_supervised) * dst
+                loss.backward()
+                if args.grad_clip and args.grad_clip > 0:
+                    nn.utils.clip_grad_norm_(student.parameters(), args.grad_clip)
+                opt.step()
+
+                total += float(loss.item())
+                total_sup += float(sup.item())
+                total_dst += float(dst.item())
+                n_batches += 1
+
+            avg = total / max(1, n_batches)
+            avg_sup = total_sup / max(1, n_batches)
+            avg_dst = total_dst / max(1, n_batches)
+
+            metrics = eval_epoch_student(student, val_loader, device, scaler_json)
+            lr_now = float(opt.param_groups[0]["lr"])
+            dt = time.perf_counter() - t0
+
+            w.writerow(
+                {
+                    "epoch": epoch,
+                    "train_loss": f"{avg:.6f}",
+                    "train_loss_sup": f"{avg_sup:.6f}",
+                    "train_loss_distill": f"{avg_dst:.6f}",
+                    "val_rmse_chl": f"{metrics['rmse']:.6f}",
+                    "val_mae_chl": f"{metrics['mae']:.6f}",
+                    "lr": f"{lr_now:.8f}",
+                    "seconds": f"{dt:.2f}",
+                }
+            )
+            fcsv.flush()
+
+            print(
+                f"Epoch {epoch:02d}: train_loss={avg:.4f} (sup={avg_sup:.4f}, distill={avg_dst:.4f}), "
+                f"val_RMSE_Chl={metrics['rmse']:.4f}, val_MAE_Chl={metrics['mae']:.4f}, lr={lr_now:.2e}"
+            )
+
+            improved = np.isfinite(metrics["rmse"]) and (metrics["rmse"] < best_val_rmse - args.early_stopping_min_delta)
+            if improved:
+                best_val_rmse = metrics["rmse"]
+                best_val_mae = metrics["mae"]
+                best_epoch = epoch
+                epochs_no_improve = 0
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state": student.state_dict(),
+                        "optimizer_state": opt.state_dict(),
+                        "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+                        "student_config": {
+                            "patch_len": scfg.patch_len,
+                            "d_model": scfg.d_model,
+                            "nhead": scfg.nhead,
+                            "encoder_layers": scfg.encoder_layers,
+                            "kv_encoder_layers": scfg.kv_encoder_layers,
+                            "share_q_kv_encoder": scfg.share_q_kv_encoder,
+                        },
+                        "teacher_ckpt": str(args.teacher_ckpt.resolve()),
+                        "val_rmse_chl_rf": best_val_rmse,
+                        "val_mae_chl_rf": best_val_mae,
+                        "window_dir": str(window_dir.resolve()),
+                        "scaler_json": str(scaler_json.resolve()),
+                        "train_args": vars(args),
+                    },
+                    best_path,
+                )
+            else:
+                epochs_no_improve += 1
+
+            if scheduler is not None:
+                if args.scheduler == "plateau":
+                    scheduler.step(metrics["rmse"])
+                else:
+                    scheduler.step()
+
+            if args.early_stopping_patience > 0 and epochs_no_improve >= args.early_stopping_patience:
+                stopped_reason = f"early_stopping_{args.early_stopping_patience}"
+                print(f"Early stopping (no val improvement for {args.early_stopping_patience} epochs).")
+                break
+
+    print(f"\nBest student checkpoint: epoch {best_epoch}, val_RMSE_Chl={best_val_rmse:.4f} → {best_path}")
+
+    train_config = {
+        "stopped_reason": stopped_reason,
+        "best_epoch": best_epoch,
+        "best_val_rmse_chl": best_val_rmse,
+        "model": "SlideStudentCrossAttn",
+        "window_dir": str(window_dir.resolve()),
+        "teacher_ckpt": str(args.teacher_ckpt.resolve()),
+        "hyperparams": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+    }
+    (ckpt_dir / "train_config_student.json").write_text(json.dumps(train_config, indent=2, default=str), encoding="utf-8")
+
+    if test_loader is not None and best_path.is_file():
+        ckpt = torch.load(best_path, map_location=device)
+        student.load_state_dict(ckpt["model_state"])
+        test_m = eval_epoch_student(student, test_loader, device, scaler_json)
+        summary = {
+            "best_epoch": best_epoch,
+            "val_rmse_chl": best_val_rmse,
+            "val_mae_chl": best_val_mae,
+            "test_rmse_chl": test_m["rmse"],
+            "test_mae_chl": test_m["mae"],
+            "checkpoint": str(best_path.resolve()),
+            "teacher_ckpt": str(args.teacher_ckpt.resolve()),
+            "stopped_reason": stopped_reason,
+        }
+        (ckpt_dir / "student_eval_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        print(
+            f"Test (best val): RMSE_Chl={test_m['rmse']:.4f}, MAE_Chl={test_m['mae']:.4f} → {ckpt_dir / 'student_eval_summary.json'}"
+        )
+
+
+if __name__ == "__main__":
+    main()
+
