@@ -183,4 +183,76 @@ class SlideStudentCrossAttn(nn.Module):
         return self.head(pooled).squeeze(-1)
 
 
-__all__ = ["SlidePatchCrossAttn", "SlideStudentCrossAttn", "SlidePatchCrossAttnConfig"]
+class SlideStudentResidual(nn.Module):
+    """
+    Setup B + residual: deployable student predicts
+      - current Chl at window end: y_end_hat_z (from x5 only)
+      - delta to horizon: delta_hat_z
+    and returns y_future_hat_z = y_end_hat_z + delta_hat_z.
+    """
+
+    def __init__(self, cfg: SlidePatchCrossAttnConfig) -> None:
+        super().__init__()
+        self.cfg = cfg
+        pl = cfg.patch_len
+        dm = cfg.d_model
+        nh = cfg.nhead
+        df = 4 * dm
+        drop = cfg.dropout
+
+        self.embed5_q = nn.Linear(pl * cfg.n_vars5, dm)
+        self.embed5_kv = nn.Linear(pl * cfg.n_vars5, dm)
+
+        el_q = nn.TransformerEncoderLayer(dm, nh, df, drop, batch_first=True)
+        self.enc_q = nn.TransformerEncoder(el_q, num_layers=cfg.encoder_layers)
+
+        if cfg.share_q_kv_encoder:
+            self.enc_kv = self.enc_q
+        else:
+            kv_layers = cfg.kv_encoder_layers if cfg.kv_encoder_layers is not None else cfg.encoder_layers
+            el_kv = nn.TransformerEncoderLayer(dm, nh, df, drop, batch_first=True)
+            self.enc_kv = nn.TransformerEncoder(el_kv, num_layers=kv_layers)
+
+        self.cross = nn.MultiheadAttention(dm, nh, dropout=drop, batch_first=True)
+        self.norm = nn.LayerNorm(dm)
+
+        self.head_end = nn.Sequential(nn.Linear(dm, dm), nn.ReLU(), nn.Linear(dm, 1))
+        self.head_delta = nn.Sequential(nn.Linear(dm, dm), nn.ReLU(), nn.Linear(dm, 1))
+
+    @staticmethod
+    def _fold(x: torch.Tensor, mask: torch.Tensor, patch_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return SlidePatchCrossAttn._fold(x, mask, patch_len)
+
+    @staticmethod
+    def _no_all_masked(pad: torch.Tensor) -> torch.Tensor:
+        return SlidePatchCrossAttn._no_all_masked(pad)
+
+    def forward(self, x5: torch.Tensor, mask5: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns (y_future_hat_z, y_end_hat_z, delta_hat_z), each (B,).
+        """
+        pl = self.cfg.patch_len
+        x5p, v5 = self._fold(x5, mask5, pl)
+        pad = self._no_all_masked(~v5)
+
+        q = self.embed5_q(x5p)
+        kv = self.embed5_kv(x5p)
+        q = self.enc_q(q, src_key_padding_mask=pad)
+        kv = self.enc_kv(kv, src_key_padding_mask=pad)
+
+        pad_k = self._no_all_masked(pad)
+        attn_out, _ = self.cross(q, kv, kv, key_padding_mask=pad_k)
+        out = self.norm(attn_out + q)
+        pooled = out.mean(dim=1)
+
+        y_end = self.head_end(pooled).squeeze(-1)
+        delta = self.head_delta(pooled).squeeze(-1)
+        return y_end + delta, y_end, delta
+
+
+__all__ = [
+    "SlidePatchCrossAttn",
+    "SlideStudentCrossAttn",
+    "SlideStudentResidual",
+    "SlidePatchCrossAttnConfig",
+]

@@ -65,6 +65,11 @@ class SlideWindowNPZDataset(Dataset):
         self.X6_mask = torch.from_numpy(data["X6_mask"]).bool()
         self.y = torch.from_numpy(data["y_z"]).float()
         self.y_mask = torch.from_numpy(data["y_mask"]).bool()
+        self.chl_end = (
+            torch.from_numpy(data["chl_z_at_window_end"]).float()
+            if "chl_z_at_window_end" in data.files
+            else None
+        )
         # Keep times internally; we will expose them as int64 nanoseconds for DataLoader collation.
         self.context_end_time = data["context_end_time"] if "context_end_time" in data.files else None
         self.target_time = data["target_time"] if "target_time" in data.files else None
@@ -81,6 +86,10 @@ class SlideWindowNPZDataset(Dataset):
             "y": self.y[idx],
             "y_mask": self.y_mask[idx],
         }
+        if self.chl_end is not None:
+            ce = self.chl_end[idx]
+            out["chl_end"] = ce
+            out["chl_end_mask"] = torch.isfinite(ce)
         if self.context_end_time is not None:
             # int64 nanoseconds since epoch; collates cleanly.
             out["context_end_time_ns"] = int(np.asarray(self.context_end_time[idx]).astype("datetime64[ns]").astype("int64"))

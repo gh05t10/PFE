@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 
 from src.datasets import SlideWindowNPZDataset
 from src.eval_baselines import run_all_baselines
-from src.models_slide import SlidePatchCrossAttn, SlidePatchCrossAttnConfig, SlideStudentCrossAttn
+from src.models_slide import SlidePatchCrossAttn, SlidePatchCrossAttnConfig, SlideStudentCrossAttn, SlideStudentResidual
 from src.resample_config import freq_slug, get_resample_freq
 from src.train_utils import set_seed
 from src.window_pick import pick_window_dir
@@ -197,6 +197,12 @@ def main() -> None:
         action="store_true",
         help="save y_true/y_pred arrays (valid samples only) for best checkpoint to checkpoints_slide_student/preds_{val,test}.npz",
     )
+    p.add_argument(
+        "--residual",
+        action="store_true",
+        help="deployable residual: student predicts y_end_hat_z + delta_hat_z; supervised on y_end (from chl_z_at_window_end) and delta (y - chl_end)",
+    )
+    p.add_argument("--beta-end", type=float, default=0.2, help="weight for end-of-window supervised loss when --residual")
     args = p.parse_args()
 
     if not (0.0 <= args.alpha_supervised <= 1.0):
@@ -266,7 +272,10 @@ def main() -> None:
         share_q_kv_encoder=bool(args.share_q_kv_encoder),
         dropout=0.1,
     )
-    student = SlideStudentCrossAttn(scfg).to(device)
+    if args.residual:
+        student = SlideStudentResidual(scfg).to(device)
+    else:
+        student = SlideStudentCrossAttn(scfg).to(device)
 
     opt = torch.optim.AdamW(student.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.MSELoss()
@@ -312,19 +321,38 @@ def main() -> None:
                 x6_mask = batch["x6_mask"].to(device)
                 y = batch["y"].to(device)
                 y_mask = batch["y_mask"].to(device)
+                chl_end = batch.get("chl_end")
+                chl_end_mask = batch.get("chl_end_mask")
 
                 valid = y_mask & torch.isfinite(y)
                 if valid.sum() == 0:
                     continue
 
                 opt.zero_grad()
-                pred_s = student(x, x_mask)
+                if args.residual:
+                    if chl_end is None or chl_end_mask is None:
+                        raise RuntimeError("Residual mode requires chl_end/chl_end_mask in batch.")
+                    ce = chl_end.to(device)
+                    cem = chl_end_mask.to(device)
+                    valid2 = valid & cem & torch.isfinite(ce)
+                    if valid2.sum() == 0:
+                        continue
+                    y_future_s, y_end_s, delta_s = student(x, x_mask)
+                    delta_true = (y - ce)
+                else:
+                    pred_s = student(x, x_mask)
                 with torch.no_grad():
                     pred_t = teacher(x, x_mask, x6, x6_mask)
 
-                sup = loss_fn(pred_s[valid], y[valid])
-                dst = loss_fn(pred_s[valid], pred_t[valid].detach())
-                loss = args.alpha_supervised * sup + (1.0 - args.alpha_supervised) * dst
+                if args.residual:
+                    sup = loss_fn(delta_s[valid2], delta_true[valid2])
+                    dst = loss_fn(delta_s[valid2], (pred_t - ce)[valid2].detach())
+                    end_sup = loss_fn(y_end_s[valid2], ce[valid2])
+                    loss = args.alpha_supervised * sup + (1.0 - args.alpha_supervised) * dst + args.beta_end * end_sup
+                else:
+                    sup = loss_fn(pred_s[valid], y[valid])
+                    dst = loss_fn(pred_s[valid], pred_t[valid].detach())
+                    loss = args.alpha_supervised * sup + (1.0 - args.alpha_supervised) * dst
                 loss.backward()
                 if args.grad_clip and args.grad_clip > 0:
                     nn.utils.clip_grad_norm_(student.parameters(), args.grad_clip)
@@ -339,7 +367,27 @@ def main() -> None:
             avg_sup = total_sup / max(1, n_batches)
             avg_dst = total_dst / max(1, n_batches)
 
-            metrics = eval_epoch_student(student, val_loader, device, scaler_json)
+            # Eval: for residual student, eval on future prediction (y_end_hat + delta_hat).
+            if args.residual:
+                @torch.no_grad()
+                def eval_residual(m, loader):
+                    m.eval()
+                    se=[]; ae=[]
+                    for b in loader:
+                        xx=b["x"].to(device); xm=b["x_mask"].to(device)
+                        yy=b["y"].to(device); ym=b["y_mask"].to(device)
+                        v=ym & torch.isfinite(yy)
+                        if v.sum()==0: continue
+                        yhat,_,_ = m(xx,xm)
+                        y_np=yy[v].cpu().numpy(); p_np=yhat[v].cpu().numpy()
+                        y_raw=inverse_target_from_json(y_np, scaler_json); p_raw=inverse_target_from_json(p_np, scaler_json)
+                        se.append((p_raw-y_raw)**2); ae.append(np.abs(p_raw-y_raw))
+                    if not se: return {"rmse": float("nan"), "mae": float("nan")}
+                    se_all=np.concatenate(se); ae_all=np.concatenate(ae)
+                    return {"rmse": float(np.sqrt(se_all.mean())), "mae": float(ae_all.mean())}
+                metrics = eval_residual(student, val_loader)
+            else:
+                metrics = eval_epoch_student(student, val_loader, device, scaler_json)
             lr_now = float(opt.param_groups[0]["lr"])
             dt = time.perf_counter() - t0
 
@@ -438,8 +486,35 @@ def main() -> None:
         )
 
         if args.save_preds:
-            yv_z, pv_z, yv_ct, yv_tt = collect_valid_preds_student(student, val_loader, device)
-            yt_z, pt_z, yt_ct, yt_tt = collect_valid_preds_student(student, test_loader, device)
+            if args.residual:
+                # collect future preds from y_end_hat + delta_hat
+                @torch.no_grad()
+                def collect_future(loader):
+                    student.eval()
+                    ys=[]; ps=[]; cts=[]; tts=[]; have=None
+                    for b in loader:
+                        xx=b["x"].to(device); xm=b["x_mask"].to(device)
+                        yy=b["y"].to(device); ym=b["y_mask"].to(device)
+                        v=ym & torch.isfinite(yy)
+                        if v.sum()==0: continue
+                        yhat,_,_ = student(xx,xm)
+                        ys.append(yy[v].cpu().numpy()); ps.append(yhat[v].cpu().numpy())
+                        if have is None:
+                            have=("context_end_time_ns" in b) and ("target_time_ns" in b)
+                        if have:
+                            v_np=v.cpu().numpy().astype(bool)
+                            cts.append(np.asarray(b["context_end_time_ns"])[v_np].astype(np.int64))
+                            tts.append(np.asarray(b["target_time_ns"])[v_np].astype(np.int64))
+                    if not ys:
+                        return np.array([],dtype=np.float32), np.array([],dtype=np.float32), None, None
+                    y_all=np.concatenate(ys); p_all=np.concatenate(ps)
+                    if have: return y_all,p_all,np.concatenate(cts),np.concatenate(tts)
+                    return y_all,p_all,None,None
+                yv_z, pv_z, yv_ct, yv_tt = collect_future(val_loader)
+                yt_z, pt_z, yt_ct, yt_tt = collect_future(test_loader)
+            else:
+                yv_z, pv_z, yv_ct, yv_tt = collect_valid_preds_student(student, val_loader, device)
+                yt_z, pt_z, yt_ct, yt_tt = collect_valid_preds_student(student, test_loader, device)
 
             yv_rf = inverse_target_from_json(yv_z, scaler_json)
             pv_rf = inverse_target_from_json(pv_z, scaler_json)

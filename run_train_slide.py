@@ -122,12 +122,26 @@ def eval_epoch(
             x6_mask = batch["x6_mask"].to(device)
             y = batch["y"].to(device)
             y_mask = batch["y_mask"].to(device)
+            chl_end = batch.get("chl_end")
+            chl_end_mask = batch.get("chl_end_mask")
 
             valid = y_mask & torch.isfinite(y)
             if valid.sum() == 0:
                 continue
-            y = y[valid]
-            pred = model(x, x_mask, x6, x6_mask)[valid]
+            pred_z = model(x, x_mask, x6, x6_mask)
+            if getattr(model, "_predicts_delta", False):
+                if chl_end is None or chl_end_mask is None:
+                    raise RuntimeError("Residual mode requires chl_end/chl_end_mask in batch.")
+                ce = chl_end.to(device)
+                cem = chl_end_mask.to(device)
+                valid = valid & cem & torch.isfinite(ce)
+                if valid.sum() == 0:
+                    continue
+                y = y[valid]
+                pred = (pred_z + ce)[valid]
+            else:
+                y = y[valid]
+                pred = pred_z[valid]
 
             y_np = y.detach().cpu().numpy()
             p_np = pred.detach().cpu().numpy()
@@ -175,6 +189,11 @@ def main() -> None:
         "--save-preds",
         action="store_true",
         help="save y_true/y_pred arrays (valid samples only) for best checkpoint to checkpoints_slide/preds_{val,test}.npz",
+    )
+    p.add_argument(
+        "--residual",
+        action="store_true",
+        help="train to predict delta_z = y_z - chl_end_z; final y_hat_z = chl_end_z + delta_z (requires chl_z_at_window_end in NPZ)",
     )
     args = p.parse_args()
 
@@ -250,6 +269,9 @@ def main() -> None:
         dropout=0.1,
     )
     model = SlidePatchCrossAttn(mcfg).to(device)
+    if args.residual:
+        # marker used in eval/pred saving
+        setattr(model, "_predicts_delta", True)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.MSELoss()
 
@@ -286,6 +308,8 @@ def main() -> None:
                 x6_mask = batch["x6_mask"].to(device)
                 y = batch["y"].to(device)
                 y_mask = batch["y_mask"].to(device)
+                chl_end = batch.get("chl_end")
+                chl_end_mask = batch.get("chl_end_mask")
 
                 valid = y_mask & torch.isfinite(y)
                 if valid.sum() == 0:
@@ -293,7 +317,18 @@ def main() -> None:
 
                 opt.zero_grad()
                 pred = model(x, x_mask, x6, x6_mask)
-                loss = loss_fn(pred[valid], y[valid])
+                if args.residual:
+                    if chl_end is None or chl_end_mask is None:
+                        raise RuntimeError("Residual mode requires chl_end/chl_end_mask in batch.")
+                    ce = chl_end.to(device)
+                    cem = chl_end_mask.to(device)
+                    valid2 = valid & cem & torch.isfinite(ce)
+                    if valid2.sum() == 0:
+                        continue
+                    delta = (y - ce)
+                    loss = loss_fn(pred[valid2], delta[valid2])
+                else:
+                    loss = loss_fn(pred[valid], y[valid])
                 loss.backward()
                 if args.grad_clip and args.grad_clip > 0:
                     nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
@@ -400,6 +435,33 @@ def main() -> None:
             # Save valid-only arrays to keep file small & avoid ambiguity about masked targets.
             yv_z, pv_z, yv_ct, yv_tt = collect_valid_preds(model, val_loader, device)
             yt_z, pt_z, yt_ct, yt_tt = collect_valid_preds(model, test_loader, device)
+
+            # If residual mode: pv_z / pt_z are delta_z; reconstruct y_hat_z with chl_end from NPZ.
+            if args.residual:
+                val_npz = np.load(window_dir / "val.npz", allow_pickle=False)
+                test_npz = np.load(window_dir / "test.npz", allow_pickle=False)
+                # valid-only arrays were collected in order of dataloader; easiest is to recompute preds with end added.
+                # Re-collect with ends applied by calling eval loop style.
+                # For saving, we only guarantee y_true/y_pred in RFU align; z values stored as future z.
+                # We'll override pv_z/pt_z to be y_hat_z (future) for convenience.
+                # NOTE: This assumes `collect_valid_preds` returns valid samples in the same order for y and pred.
+                # We rebuild by iterating loader once more.
+                def collect_future(model, loader):
+                    model.eval()
+                    ys=[]; ps=[]
+                    with torch.no_grad():
+                        for b in loader:
+                            x=b["x"].to(device); xm=b["x_mask"].to(device)
+                            x6=b["x6"].to(device); x6m=b["x6_mask"].to(device)
+                            y=b["y"].to(device); ym=b["y_mask"].to(device)
+                            ce=b["chl_end"].to(device); cem=b["chl_end_mask"].to(device)
+                            v=ym & torch.isfinite(y) & cem & torch.isfinite(ce)
+                            if v.sum()==0: continue
+                            dz=model(x,xm,x6,x6m)
+                            ys.append(y[v].cpu().numpy()); ps.append((dz+ce)[v].cpu().numpy())
+                    return np.concatenate(ys) if ys else np.array([],dtype=np.float32), np.concatenate(ps) if ps else np.array([],dtype=np.float32)
+                yv_z, pv_z = collect_future(model, val_loader)
+                yt_z, pt_z = collect_future(model, test_loader)
 
             yv_rf = inverse_target_from_json(yv_z, scaler_json)
             pv_rf = inverse_target_from_json(pv_z, scaler_json)
