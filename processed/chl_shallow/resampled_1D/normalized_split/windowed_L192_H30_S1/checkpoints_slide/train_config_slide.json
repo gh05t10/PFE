@@ -1,7 +1,7 @@
 {
   "stopped_reason": "early_stopping_8",
-  "best_epoch": 7,
-  "best_val_rmse_chl": 1.7235393524169922,
+  "best_epoch": 3,
+  "best_val_rmse_chl": 2.355328321456909,
   "model": "SlidePatchCrossAttn",
   "window_dir": "/home/peter/PFE/processed/chl_shallow/resampled_1D/normalized_split/windowed_L192_H30_S1",
   "hyperparams": {
@@ -30,6 +30,7 @@
     "checkpoint_dir": null,
     "skip_baselines": false,
     "log_csv": null,
-    "save_preds": false
+    "save_preds": true,
+    "residual": true
   }
 }

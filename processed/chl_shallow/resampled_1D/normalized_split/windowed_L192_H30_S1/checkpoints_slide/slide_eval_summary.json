@@ -1,9 +1,9 @@
 {
-  "best_epoch": 7,
-  "val_rmse_chl": 1.7235393524169922,
-  "val_mae_chl": 1.2217644453048706,
-  "test_rmse_chl": 2.865114450454712,
-  "test_mae_chl": 2.7368853092193604,
+  "best_epoch": 3,
+  "val_rmse_chl": 2.355328321456909,
+  "val_mae_chl": 1.7006185054779053,
+  "test_rmse_chl": 1.0410507917404175,
+  "test_mae_chl": 0.8710548877716064,
   "checkpoint": "/home/peter/PFE/processed/chl_shallow/resampled_1D/normalized_split/windowed_L192_H30_S1/checkpoints_slide/best_slide.pt",
   "stopped_reason": "early_stopping_8"
 }
