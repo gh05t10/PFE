@@ -38,6 +38,23 @@ def inverse_target_from_json(z: np.ndarray, scaler_json: Path) -> np.ndarray:
     return z * std + mu
 
 
+def _torch_load_trusted(path: Path, device: torch.device) -> dict:
+    try:
+        return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
+def _json_safe(obj: object) -> object:
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
 @torch.no_grad()
 def eval_epoch_student(
     model: nn.Module,
@@ -75,7 +92,7 @@ def eval_epoch_student(
 
 
 def load_teacher(ckpt_path: Path, device: torch.device) -> SlidePatchCrossAttn:
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = _torch_load_trusted(ckpt_path, device)
     mcfg_d = ckpt.get("model_config") or {}
     cfg = SlidePatchCrossAttnConfig(
         patch_len=int(mcfg_d.get("patch_len", 16)),
@@ -319,7 +336,7 @@ def main() -> None:
                         "val_mae_chl_rf": best_val_mae,
                         "window_dir": str(window_dir.resolve()),
                         "scaler_json": str(scaler_json.resolve()),
-                        "train_args": vars(args),
+                        "train_args": _json_safe(vars(args)),
                     },
                     best_path,
                 )
@@ -351,7 +368,7 @@ def main() -> None:
     (ckpt_dir / "train_config_student.json").write_text(json.dumps(train_config, indent=2, default=str), encoding="utf-8")
 
     if test_loader is not None and best_path.is_file():
-        ckpt = torch.load(best_path, map_location=device)
+        ckpt = _torch_load_trusted(best_path, device)
         student.load_state_dict(ckpt["model_state"])
         test_m = eval_epoch_student(student, test_loader, device, scaler_json)
         summary = {
