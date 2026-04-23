@@ -1,10 +1,10 @@
 input: /home/peter/PFE/processed/chl_shallow/chl_shallow_rule_a_timeseries.csv
 samples: 115,107
-Hampel window=97, n_sigma=3.0
+Hampel window=49, n_sigma=3.0
 winsor_inner: False
-count flag_hampel_spike: 2652
+count flag_hampel_spike: 1900
 count flag_tukey_global_potential: 1973
 count flag_tukey_monthly_daily_potential: 1128
-count combined (Hampel & monthly-daily Tukey): 49
-sum weight_chl_gt (effective mass): 112455
-sum weight_chl_gt_conservative: 115058
+count combined (Hampel & monthly-daily Tukey): 35
+sum weight_chl_gt (effective mass): 113207
+sum weight_chl_gt_conservative: 115072

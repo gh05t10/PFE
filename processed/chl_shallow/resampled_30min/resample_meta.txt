@@ -3,6 +3,7 @@ freq_slug=30min
 aggregation=median
 rule_a_filter=False
 rule_a_p=0.8
+gt_weights_csv=processed/chl_shallow/chl_shallow_transformer_gt.csv
 feature_cols=['SpCondShallow_uS/cm', 'ODOShallow_mg/L', 'TempShallow_C', 'pHShallow', 'TurbShallow_NTU+']
 target_col=ChlRFUShallow_RFU
 n_rows=128385

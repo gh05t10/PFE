@@ -1,0 +1,2 @@
+epoch,train_mse_z,val_rmse_chl,val_mae_chl,lr,seconds
+1,0.851979,2.072613,1.463639,0.00100000,0.84

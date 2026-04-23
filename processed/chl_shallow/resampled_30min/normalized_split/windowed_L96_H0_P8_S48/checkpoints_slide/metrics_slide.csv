@@ -1,0 +1,2 @@
+epoch,train_loss_z,train_loss_name,train_LY,train_LD,train_rho,val_rmse_chl,val_mae_chl,lr,seconds
+1,0.563033,tdalign_mse,0.760710,0.171807,0.660898,1.919742,1.341308,0.00050000,0.53

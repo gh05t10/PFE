@@ -1,0 +1,9 @@
+epoch,train_loss_z,train_loss_name,train_LY,train_LD,train_rho,val_rmse_chl,val_mae_chl,lr,seconds
+1,0.161094,mse,nan,nan,nan,nan,nan,0.00050000,0.35
+2,0.000000,mse,nan,nan,nan,nan,nan,0.00050000,0.29
+3,0.000000,mse,nan,nan,nan,nan,nan,0.00050000,0.29
+4,0.000000,mse,nan,nan,nan,nan,nan,0.00025000,0.25
+5,0.000000,mse,nan,nan,nan,nan,nan,0.00025000,0.29
+6,0.000000,mse,nan,nan,nan,nan,nan,0.00025000,0.22
+7,0.000000,mse,nan,nan,nan,nan,nan,0.00012500,0.21
+8,0.000000,mse,nan,nan,nan,nan,nan,0.00012500,0.17

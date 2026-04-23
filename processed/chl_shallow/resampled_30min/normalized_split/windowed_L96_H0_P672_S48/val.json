@@ -1,0 +1,70 @@
+{
+  "step": "window_dataset",
+  "resample_freq": "30min",
+  "resample_slug": "30min",
+  "normalized_split_dir": "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split",
+  "split_manifest": "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/split_manifest.json",
+  "scaler_params": "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/scaler_params.json",
+  "split_manifest_body": {
+    "input_csv": "/home/peter/PFE/processed/chl_shallow/resampled_30min/soft_sensor_resampled.csv",
+    "resample_freq": "30min",
+    "resample_slug": "30min",
+    "split_rule": {
+      "train": "DateTime < 2019-01-01T00:00:00",
+      "val": "2019-01-01T00:00:00 <= DateTime < 2021-01-01T00:00:00",
+      "test": "DateTime >= 2021-01-01T00:00:00"
+    },
+    "train_end": "2019-01-01T00:00:00",
+    "val_end": "2021-01-01T00:00:00",
+    "n_rows": {
+      "train": 79875,
+      "val": 35088,
+      "test": 13422
+    },
+    "feature_cols": [
+      "SpCondShallow_uS/cm",
+      "ODOShallow_mg/L",
+      "TempShallow_C",
+      "pHShallow",
+      "TurbShallow_NTU+"
+    ],
+    "target_col": "ChlRFUShallow_RFU",
+    "z_suffix": "_z",
+    "weight_cols_passthrough": [
+      "weight_chl_gt_conservative_resampled",
+      "weight_chl_gt_resampled"
+    ]
+  },
+  "split": "val",
+  "split_csv": "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/val.csv",
+  "out_npz": "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/windowed_L96_H0_P672_S48/val.npz",
+  "n_samples": 234,
+  "context_len": 96,
+  "horizon_steps": 0,
+  "pred_len": 672,
+  "stride": 48,
+  "max_gap_steps": 2,
+  "feature_cols": [
+    "SpCondShallow_uS/cm",
+    "ODOShallow_mg/L",
+    "TempShallow_C",
+    "pHShallow",
+    "TurbShallow_NTU+"
+  ],
+  "target_col_z": "ChlRFUShallow_RFU_z",
+  "skip_nan_target": true,
+  "shape_X_z": [
+    234,
+    96,
+    5
+  ],
+  "shape_X6_z": [
+    234,
+    96,
+    6
+  ],
+  "shape_Y_z": [
+    234,
+    672
+  ]
+}

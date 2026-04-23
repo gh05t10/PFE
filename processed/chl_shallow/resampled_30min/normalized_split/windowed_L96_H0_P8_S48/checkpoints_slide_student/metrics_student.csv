@@ -1,0 +1,2 @@
+epoch,train_loss,train_loss_sup,train_loss_distill,val_rmse_chl,val_mae_chl,lr,seconds
+1,0.396814,0.735392,0.058236,1.927460,1.381253,0.00050000,0.41

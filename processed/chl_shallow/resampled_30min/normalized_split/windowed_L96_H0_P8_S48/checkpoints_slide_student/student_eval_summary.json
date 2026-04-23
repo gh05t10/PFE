@@ -1,0 +1,10 @@
+{
+  "best_epoch": 1,
+  "val_rmse_chl": 1.927459955215454,
+  "val_mae_chl": 1.3812531232833862,
+  "test_rmse_chl": 2.36206316947937,
+  "test_mae_chl": 2.2750840187072754,
+  "checkpoint": "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/windowed_L96_H0_P8_S48/checkpoints_slide_student/best_student.pt",
+  "teacher_ckpt": "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/windowed_L96_H0_P8_S48/checkpoints_slide/best_slide.pt",
+  "stopped_reason": "max_epochs"
+}

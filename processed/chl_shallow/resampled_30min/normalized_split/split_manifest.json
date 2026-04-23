@@ -22,5 +22,9 @@
     "TurbShallow_NTU+"
   ],
   "target_col": "ChlRFUShallow_RFU",
-  "z_suffix": "_z"
+  "z_suffix": "_z",
+  "weight_cols_passthrough": [
+    "weight_chl_gt_conservative_resampled",
+    "weight_chl_gt_resampled"
+  ]
 }
