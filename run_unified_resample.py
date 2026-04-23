@@ -49,6 +49,12 @@ def main() -> None:
         default=0.8,
         help="Rule A(p) threshold when --rule-a (default 0.8)",
     )
+    p.add_argument(
+        "--gt-weights-csv",
+        type=Path,
+        default=None,
+        help="optional path to chl_shallow_transformer_gt.csv to carry weight_chl_gt into the resampled panel",
+    )
     args = p.parse_args()
 
     freq = get_resample_freq(cli=args.freq)
@@ -62,6 +68,7 @@ def main() -> None:
         agg=args.agg,
         rule_a=args.rule_a,
         rule_a_p=args.rule_a_p,
+        gt_weights_csv=args.gt_weights_csv,
     )
     path = run_unified_resample(cfg)
     print(f"freq={freq} → {path}")

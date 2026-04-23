@@ -26,7 +26,9 @@ from torch.utils.data import DataLoader
 from src.datasets import SlideWindowNPZDataset
 from src.eval_baselines import run_all_baselines
 from src.models_slide import SlidePatchCrossAttn, SlidePatchCrossAttnConfig, SlideStudentCrossAttn, SlideStudentResidual
+from src.models_student_simple import GRUStudent, GRUStudentConfig, MLPStudent, MLPStudentConfig
 from src.resample_config import freq_slug, get_resample_freq
+from src.tdalign_loss import tdalign_total_loss
 from src.train_utils import set_seed
 from src.window_pick import pick_window_dir
 
@@ -36,6 +38,36 @@ def inverse_target_from_json(z: np.ndarray, scaler_json: Path) -> np.ndarray:
     mu = float(d["target"]["mean"])
     std = float(d["target"]["std"])
     return z * std + mu
+
+
+def masked_weighted_mse(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Numerically safe masked (weighted) MSE.
+
+    Key trick: avoid NaNs in the computation graph by filling target with pred.detach()
+    where mask is false, so error becomes 0 there without evaluating NaN branches.
+    """
+    m = mask & torch.isfinite(pred)
+    if weights is not None:
+        w = torch.where(torch.isfinite(weights), weights, torch.zeros_like(weights)).clamp(min=0.0)
+        m = m & (w > 0)
+    else:
+        w = None
+
+    if m.sum() == 0:
+        return torch.tensor(float("nan"), device=pred.device)
+
+    tgt = torch.where(m, target, pred.detach())
+    err2 = (pred - tgt) ** 2
+    if w is None:
+        return err2[m].mean()
+    ww = w[m]
+    return (err2[m] * ww).sum() / ww.sum().clamp_min(1e-12)
 
 
 def _torch_load_trusted(path: Path, device: torch.device) -> dict:
@@ -75,8 +107,13 @@ def collect_valid_preds_student(
     for batch in loader:
         x = batch["x"].to(device)
         x_mask = batch["x_mask"].to(device)
-        y = batch["y"].to(device)
-        y_mask = batch["y_mask"].to(device)
+        y = batch.get("y_seq")
+        y_mask = batch.get("y_seq_mask")
+        if y is None or y_mask is None:
+            y = batch["y"]
+            y_mask = batch["y_mask"]
+        y = y.to(device)
+        y_mask = y_mask.to(device)
 
         valid = y_mask & torch.isfinite(y)
         if valid.sum() == 0:
@@ -111,40 +148,65 @@ def eval_epoch_student(
     model.eval()
     se = []
     ae = []
+    n_valid = 0
     for batch in loader:
         x = batch["x"].to(device)
         x_mask = batch["x_mask"].to(device)
-        y = batch["y"].to(device)
-        y_mask = batch["y_mask"].to(device)
+        y = batch.get("y_seq")
+        y_mask = batch.get("y_seq_mask")
+        if y is None or y_mask is None:
+            y = batch["y"]
+            y_mask = batch["y_mask"]
+        y = y.to(device)
+        y_mask = y_mask.to(device)
 
         valid = y_mask & torch.isfinite(y)
         if valid.sum() == 0:
             continue
+        pred = model(x, x_mask)
+        # Residual student returns (y_future_hat, y_end_hat, delta_hat)
+        if isinstance(pred, tuple):
+            pred = pred[0]
+        valid = valid & torch.isfinite(pred)
+        if valid.sum() == 0:
+            continue
         yv = y[valid]
-        pv = model(x, x_mask)[valid]
+        pv = pred[valid]
 
         y_np = yv.detach().cpu().numpy()
         p_np = pv.detach().cpu().numpy()
         y_raw = inverse_target_from_json(y_np, scaler_json)
         p_raw = inverse_target_from_json(p_np, scaler_json)
-        se.append((p_raw - y_raw) ** 2)
-        ae.append(np.abs(p_raw - y_raw))
+        e = p_raw - y_raw
+        ok = np.isfinite(e)
+        if ok.sum() == 0:
+            continue
+        se.append((e[ok]) ** 2)
+        ae.append(np.abs(e[ok]))
+        n_valid += int(ok.sum())
 
     if not se:
-        return {"rmse": float("nan"), "mae": float("nan")}
+        return {"rmse": float("nan"), "mae": float("nan"), "n_valid": 0}
     se_all = np.concatenate(se)
     ae_all = np.concatenate(ae)
-    return {"rmse": float(np.sqrt(se_all.mean())), "mae": float(ae_all.mean())}
+    return {"rmse": float(np.sqrt(se_all.mean())), "mae": float(ae_all.mean()), "n_valid": int(n_valid)}
 
 
 def load_teacher(ckpt_path: Path, device: torch.device) -> SlidePatchCrossAttn:
     ckpt = _torch_load_trusted(ckpt_path, device)
     mcfg_d = ckpt.get("model_config") or {}
+    if "pred_len" not in mcfg_d:
+        # Backward compatibility: older checkpoints didn't store pred_len.
+        try:
+            mcfg_d["pred_len"] = int(ckpt["model_state"]["head.2.bias"].shape[0])
+        except Exception:
+            mcfg_d["pred_len"] = 1
     cfg = SlidePatchCrossAttnConfig(
         patch_len=int(mcfg_d.get("patch_len", 16)),
         d_model=int(mcfg_d.get("d_model", 64)),
         nhead=int(mcfg_d.get("nhead", 4)),
         encoder_layers=int(mcfg_d.get("encoder_layers", 2)),
+        pred_len=int(mcfg_d.get("pred_len", 1)),
         dropout=0.1,
     )
     model = SlidePatchCrossAttn(cfg).to(device)
@@ -162,6 +224,14 @@ def main() -> None:
     p.add_argument("--rule-a", action="store_true")
     p.add_argument("--window-dir", type=Path, default=None)
     p.add_argument("--teacher-ckpt", type=Path, required=True, help="Path to teacher best_slide.pt")
+    p.add_argument(
+        "--student-arch",
+        choices=("transformer", "gru", "mlp"),
+        default="transformer",
+        help="student architecture (gru is recommended for very long horizons to avoid NaN grads)",
+    )
+    p.add_argument("--mlp-hidden-dim", type=int, default=256, help="MLP student hidden dim (when --student-arch mlp)")
+    p.add_argument("--mlp-dropout", type=float, default=0.2, help="MLP student dropout (when --student-arch mlp)")
     p.add_argument("--patch-len", type=int, default=16)
     p.add_argument("--d-model", type=int, default=64)
     p.add_argument("--nhead", type=int, default=4)
@@ -203,6 +273,17 @@ def main() -> None:
         help="deployable residual: student predicts y_end_hat_z + delta_hat_z; supervised on y_end (from chl_z_at_window_end) and delta (y - chl_end)",
     )
     p.add_argument("--beta-end", type=float, default=0.2, help="weight for end-of-window supervised loss when --residual")
+    p.add_argument(
+        "--tdalign",
+        action="store_true",
+        help="use TDAlign objective for the supervised term on multi-step horizons (requires Y_z and chl_end in batch)",
+    )
+    p.add_argument(
+        "--tdalign-loss",
+        choices=("mse", "mae"),
+        default="mse",
+        help="loss type for L_Y and L_D in TDAlign",
+    )
     args = p.parse_args()
 
     if not (0.0 <= args.alpha_supervised <= 1.0):
@@ -210,6 +291,12 @@ def main() -> None:
 
     set_seed(args.seed, deterministic=args.deterministic)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # oneDNN / MKLDNN can produce NaN gradients for some ops on some CPU builds.
+    if device.type == "cpu":
+        try:
+            torch.backends.mkldnn.enabled = False  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     freq = get_resample_freq(cli=args.freq)
     slug = freq_slug(freq)
@@ -262,22 +349,42 @@ def main() -> None:
     L = int(tmp["X_z"].shape[1])
     if L % args.patch_len != 0:
         raise SystemExit(f"context_len L={L} not divisible by --patch-len={args.patch_len}")
+    pred_len = int(tmp["Y_z"].shape[1]) if "Y_z" in tmp.files else 1
 
-    scfg = SlidePatchCrossAttnConfig(
-        patch_len=args.patch_len,
-        d_model=args.d_model,
-        nhead=args.nhead,
-        encoder_layers=args.encoder_layers,
-        kv_encoder_layers=args.kv_encoder_layers,
-        share_q_kv_encoder=bool(args.share_q_kv_encoder),
-        dropout=0.1,
-    )
-    if args.residual:
-        student = SlideStudentResidual(scfg).to(device)
+    if args.student_arch == "mlp":
+        if args.residual:
+            raise SystemExit("--student-arch mlp currently supports non-residual only.")
+        mcfg2 = MLPStudentConfig(
+            context_len=L,
+            pred_len=pred_len,
+            hidden_dim=int(args.mlp_hidden_dim),
+            dropout=float(args.mlp_dropout),
+        )
+        student: nn.Module = MLPStudent(mcfg2).to(device)
+    elif args.student_arch == "gru":
+        if args.residual:
+            raise SystemExit("--student-arch gru currently supports non-residual only.")
+        gcfg = GRUStudentConfig(pred_len=pred_len)
+        student: nn.Module = GRUStudent(gcfg).to(device)
     else:
-        student = SlideStudentCrossAttn(scfg).to(device)
+        scfg = SlidePatchCrossAttnConfig(
+            patch_len=args.patch_len,
+            d_model=args.d_model,
+            nhead=args.nhead,
+            encoder_layers=args.encoder_layers,
+            kv_encoder_layers=args.kv_encoder_layers,
+            share_q_kv_encoder=bool(args.share_q_kv_encoder),
+            pred_len=pred_len,
+            dropout=0.1,
+        )
+        if args.residual:
+            student = SlideStudentResidual(scfg).to(device)
+        else:
+            student = SlideStudentCrossAttn(scfg).to(device)
 
-    opt = torch.optim.AdamW(student.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    params = list(student.parameters())
+
+    opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.MSELoss()
 
     scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
@@ -302,7 +409,17 @@ def main() -> None:
     with open(log_csv, "w", newline="", encoding="utf-8") as fcsv:
         w = csv.DictWriter(
             fcsv,
-            fieldnames=["epoch", "train_loss", "train_loss_sup", "train_loss_distill", "val_rmse_chl", "val_mae_chl", "lr", "seconds"],
+            fieldnames=[
+                "epoch",
+                "train_loss",
+                "train_loss_sup",
+                "train_loss_distill",
+                "val_rmse_chl",
+                "val_mae_chl",
+                "val_n_valid",
+                "lr",
+                "seconds",
+            ],
         )
         w.writeheader()
 
@@ -319,8 +436,17 @@ def main() -> None:
                 x_mask = batch["x_mask"].to(device)
                 x6 = batch["x6"].to(device)
                 x6_mask = batch["x6_mask"].to(device)
-                y = batch["y"].to(device)
-                y_mask = batch["y_mask"].to(device)
+                y = batch.get("y_seq")
+                y_mask = batch.get("y_seq_mask")
+                y_w = batch.get("y_seq_w")
+                if y is None or y_mask is None:
+                    y = batch["y"]
+                    y_mask = batch["y_mask"]
+                    y_w = batch.get("y_w")
+                y = y.to(device)
+                y_mask = y_mask.to(device)
+                if y_w is not None:
+                    y_w = y_w.to(device)
                 chl_end = batch.get("chl_end")
                 chl_end_mask = batch.get("chl_end_mask")
 
@@ -334,26 +460,117 @@ def main() -> None:
                         raise RuntimeError("Residual mode requires chl_end/chl_end_mask in batch.")
                     ce = chl_end.to(device)
                     cem = chl_end_mask.to(device)
-                    valid2 = valid & cem & torch.isfinite(ce)
+                    # valid is (B,H) for multi-step; cem/ce are (B,)
+                    if y.ndim == 2:
+                        valid2 = valid & cem[:, None] & torch.isfinite(ce)[:, None]
+                    else:
+                        valid2 = valid & cem & torch.isfinite(ce)
                     if valid2.sum() == 0:
                         continue
                     y_future_s, y_end_s, delta_s = student(x, x_mask)
-                    delta_true = (y - ce)
+                    # Broadcast end over horizon when y is vector.
+                    if y.ndim == 1:
+                        delta_true = (y - ce)
+                    else:
+                        delta_true = (y - ce[:, None])
+                    # For residual mode, the student outputs y_future_s (not pred_s)
+                    pred_s = y_future_s
                 else:
                     pred_s = student(x, x_mask)
                 with torch.no_grad():
                     pred_t = teacher(x, x_mask, x6, x6_mask)
+                # ensure we never compute losses on NaN/inf predictions
+                if y.ndim == 2:
+                    valid = valid & torch.isfinite(pred_s) & torch.isfinite(pred_t)
+                else:
+                    valid = valid & torch.isfinite(pred_s) & torch.isfinite(pred_t)
+                if valid.sum() == 0:
+                    continue
 
                 if args.residual:
-                    sup = loss_fn(delta_s[valid2], delta_true[valid2])
-                    dst = loss_fn(delta_s[valid2], (pred_t - ce)[valid2].detach())
-                    end_sup = loss_fn(y_end_s[valid2], ce[valid2])
+                    if y_w is not None and y.ndim == 2:
+                        ww = torch.where(torch.isfinite(y_w), y_w, torch.zeros_like(y_w)).clamp(min=0.0)
+                        m_bool = valid2 & (ww > 0) & torch.isfinite(delta_s) & torch.isfinite(delta_true)
+                        wm = ww * m_bool.float()
+                        den = wm.sum().clamp_min(1e-12)
+                        # If all weights are zero for this batch, skip it.
+                        if den.item() <= 1e-12:
+                            continue
+                        err2 = (delta_s - delta_true) ** 2
+                        err2 = torch.where(m_bool, err2, torch.zeros_like(err2))
+                        sup = (err2 * ww).sum() / den
+                    else:
+                        sup = loss_fn(delta_s[valid2], delta_true[valid2])
+                    # Distill target: if teacher was trained in residual mode, it outputs delta_z directly.
+                    # We detect that by checkpoint filename convention (best_slide_residual.pt).
+                    teacher_is_residual = "residual" in str(args.teacher_ckpt).lower()
+                    if teacher_is_residual:
+                        tgt = pred_t.detach()
+                    else:
+                        # teacher predicts y_future; convert to delta target
+                        tgt = (pred_t - ce[:, None]).detach()
+                    # masked distill MSE without boolean indexing (more stable for long horizons)
+                    m_dst_bool = valid2 & torch.isfinite(delta_s) & torch.isfinite(tgt)
+                    m_dst = m_dst_bool.float()
+                    if m_dst.sum().item() <= 0:
+                        continue
+                    derr2 = (delta_s - tgt) ** 2
+                    derr2 = torch.where(m_dst_bool, derr2, torch.zeros_like(derr2))
+                    dst = derr2.sum() / m_dst.sum().clamp_min(1e-12)
+                    # y_end_s and ce are (B,)
+                    end_mask = cem & torch.isfinite(ce) & torch.isfinite(y_end_s)
+                    if end_mask.sum() == 0:
+                        continue
+                    end_sup = loss_fn(y_end_s[end_mask], ce[end_mask])
                     loss = args.alpha_supervised * sup + (1.0 - args.alpha_supervised) * dst + args.beta_end * end_sup
                 else:
-                    sup = loss_fn(pred_s[valid], y[valid])
-                    dst = loss_fn(pred_s[valid], pred_t[valid].detach())
+                    if args.tdalign and y.ndim == 2:
+                        if chl_end is None or chl_end_mask is None:
+                            raise RuntimeError("TDAlign requires chl_end/chl_end_mask in batch.")
+                        ce = chl_end.to(device)
+                        cem = chl_end_mask.to(device)
+                        valid2 = valid & cem[:, None] & torch.isfinite(ce)[:, None]
+                        if valid2.sum() == 0:
+                            continue
+                        sup, _, _, _ = tdalign_total_loss(
+                            y_true=y,
+                            y_hat=pred_s,
+                            y_end=ce,
+                            mask=valid2,
+                            weights=y_w if (y_w is not None and y_w.ndim == 2) else None,
+                            loss=args.tdalign_loss,
+                        )
+                    else:
+                        if y_w is not None and y.ndim == 2:
+                            sup = masked_weighted_mse(pred_s, y, valid, weights=y_w)
+                        else:
+                            sup = masked_weighted_mse(pred_s, y, valid, weights=None)
+                    # Distill target: if teacher was trained in residual mode, it outputs delta_z.
+                    teacher_is_residual = "residual" in str(args.teacher_ckpt).lower()
+                    if teacher_is_residual:
+                        if chl_end is None or chl_end_mask is None:
+                            raise RuntimeError("Residual teacher distill requires chl_end/chl_end_mask in batch.")
+                        ce = chl_end.to(device)
+                        # teacher_y_future = ce + delta_teacher
+                        tgt = (pred_t + ce[:, None]).detach() if pred_t.ndim == 2 else (pred_t + ce).detach()
+                    else:
+                        tgt = pred_t.detach()
+                    dst = masked_weighted_mse(pred_s, tgt, valid, weights=None)
                     loss = args.alpha_supervised * sup + (1.0 - args.alpha_supervised) * dst
+                if not torch.isfinite(loss).item():
+                    continue
                 loss.backward()
+                # Guard NaN/Inf gradients
+                bad_grad = False
+                for p in student.parameters():
+                    if p.grad is None:
+                        continue
+                    if not torch.isfinite(p.grad).all().item():
+                        bad_grad = True
+                        break
+                if bad_grad:
+                    opt.zero_grad(set_to_none=True)
+                    continue
                 if args.grad_clip and args.grad_clip > 0:
                     nn.utils.clip_grad_norm_(student.parameters(), args.grad_clip)
                 opt.step()
@@ -367,27 +584,8 @@ def main() -> None:
             avg_sup = total_sup / max(1, n_batches)
             avg_dst = total_dst / max(1, n_batches)
 
-            # Eval: for residual student, eval on future prediction (y_end_hat + delta_hat).
-            if args.residual:
-                @torch.no_grad()
-                def eval_residual(m, loader):
-                    m.eval()
-                    se=[]; ae=[]
-                    for b in loader:
-                        xx=b["x"].to(device); xm=b["x_mask"].to(device)
-                        yy=b["y"].to(device); ym=b["y_mask"].to(device)
-                        v=ym & torch.isfinite(yy)
-                        if v.sum()==0: continue
-                        yhat,_,_ = m(xx,xm)
-                        y_np=yy[v].cpu().numpy(); p_np=yhat[v].cpu().numpy()
-                        y_raw=inverse_target_from_json(y_np, scaler_json); p_raw=inverse_target_from_json(p_np, scaler_json)
-                        se.append((p_raw-y_raw)**2); ae.append(np.abs(p_raw-y_raw))
-                    if not se: return {"rmse": float("nan"), "mae": float("nan")}
-                    se_all=np.concatenate(se); ae_all=np.concatenate(ae)
-                    return {"rmse": float(np.sqrt(se_all.mean())), "mae": float(ae_all.mean())}
-                metrics = eval_residual(student, val_loader)
-            else:
-                metrics = eval_epoch_student(student, val_loader, device, scaler_json)
+            # Eval: `eval_epoch_student` handles both normal and residual student outputs (tuple).
+            metrics = eval_epoch_student(student, val_loader, device, scaler_json)
             lr_now = float(opt.param_groups[0]["lr"])
             dt = time.perf_counter() - t0
 
@@ -399,6 +597,7 @@ def main() -> None:
                     "train_loss_distill": f"{avg_dst:.6f}",
                     "val_rmse_chl": f"{metrics['rmse']:.6f}",
                     "val_mae_chl": f"{metrics['mae']:.6f}",
+                    "val_n_valid": int(metrics.get("n_valid", 0)),
                     "lr": f"{lr_now:.8f}",
                     "seconds": f"{dt:.2f}",
                 }
@@ -407,7 +606,8 @@ def main() -> None:
 
             print(
                 f"Epoch {epoch:02d}: train_loss={avg:.4f} (sup={avg_sup:.4f}, distill={avg_dst:.4f}), "
-                f"val_RMSE_Chl={metrics['rmse']:.4f}, val_MAE_Chl={metrics['mae']:.4f}, lr={lr_now:.2e}"
+                f"val_RMSE_Chl={metrics['rmse']:.4f}, val_MAE_Chl={metrics['mae']:.4f}, "
+                f"val_n_valid={int(metrics.get('n_valid', 0))}, lr={lr_now:.2e}"
             )
 
             improved = np.isfinite(metrics["rmse"]) and (metrics["rmse"] < best_val_rmse - args.early_stopping_min_delta)
@@ -416,20 +616,29 @@ def main() -> None:
                 best_val_mae = metrics["mae"]
                 best_epoch = epoch
                 epochs_no_improve = 0
+                if args.student_arch in ("gru", "mlp"):
+                    student_cfg_payload = {
+                        "arch": args.student_arch,
+                        "pred_len": pred_len,
+                    }
+                else:
+                    student_cfg_payload = {
+                        "arch": "transformer",
+                        "patch_len": scfg.patch_len,
+                        "d_model": scfg.d_model,
+                        "nhead": scfg.nhead,
+                        "encoder_layers": scfg.encoder_layers,
+                        "kv_encoder_layers": scfg.kv_encoder_layers,
+                        "share_q_kv_encoder": scfg.share_q_kv_encoder,
+                        "pred_len": pred_len,
+                    }
                 torch.save(
                     {
                         "epoch": epoch,
                         "model_state": student.state_dict(),
                         "optimizer_state": opt.state_dict(),
                         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
-                        "student_config": {
-                            "patch_len": scfg.patch_len,
-                            "d_model": scfg.d_model,
-                            "nhead": scfg.nhead,
-                            "encoder_layers": scfg.encoder_layers,
-                            "kv_encoder_layers": scfg.kv_encoder_layers,
-                            "share_q_kv_encoder": scfg.share_q_kv_encoder,
-                        },
+                        "student_config": student_cfg_payload,
                         "teacher_ckpt": str(args.teacher_ckpt.resolve()),
                         "val_rmse_chl_rf": best_val_rmse,
                         "val_mae_chl_rf": best_val_mae,
@@ -476,6 +685,7 @@ def main() -> None:
             "val_mae_chl": best_val_mae,
             "test_rmse_chl": test_m["rmse"],
             "test_mae_chl": test_m["mae"],
+            "test_n_valid": int(test_m.get("n_valid", 0)),
             "checkpoint": str(best_path.resolve()),
             "teacher_ckpt": str(args.teacher_ckpt.resolve()),
             "stopped_reason": stopped_reason,

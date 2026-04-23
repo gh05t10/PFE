@@ -64,6 +64,15 @@ def run_split_and_normalize(cfg: SplitNormalizeConfig) -> dict[str, Any]:
     scalers = fit_per_channel_scalers(train_df, FEATURE_COLS, TARGET_COL)
     df_z = transform_frame(df, scalers, FEATURE_COLS, TARGET_COL)
 
+    # Pass-through any GT weight columns (already in [0,1]) so training can weight losses.
+    weight_cols = [c for c in df.columns if c.startswith("weight_chl_gt")]
+    weight_resampled_cols = [c for c in df.columns if c.startswith("weight_chl_gt") and c.endswith("_resampled")]
+    passthrough = sorted(set(weight_cols + weight_resampled_cols))
+    for c in passthrough:
+        if c in df_z.columns:
+            continue
+        df_z[c] = pd.to_numeric(df[c], errors="coerce")
+
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     for sp in ("train", "val", "test"):
         part = df_z.loc[df_z["split"] == sp].copy()
@@ -84,6 +93,7 @@ def run_split_and_normalize(cfg: SplitNormalizeConfig) -> dict[str, Any]:
         "feature_cols": list(FEATURE_COLS),
         "target_col": TARGET_COL,
         "z_suffix": "_z",
+        "weight_cols_passthrough": passthrough,
     }
     (cfg.out_dir / "split_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 

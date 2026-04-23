@@ -3,9 +3,9 @@
 Build windowed dataset (minimal preprocess end-state) from ``normalized_split/*.csv``.
 
 Writes one ``.npz`` + sidecar ``.json`` per split under
-``.../normalized_<slug>/windowed_L{L}_H{H}_S{S}/``.
+``.../normalized_<slug>/windowed_L{L}_H{T}_P{H}_S{S}/``.
 
-Defaults: L=96 (~2 days @ 30min), horizon_steps=1 (one step ahead), stride=1.
+Defaults: L=96 (~2 days @ 30min), horizon_steps=0, pred_len=48 (1 day), stride=1.
 """
 
 from __future__ import annotations
@@ -34,8 +34,25 @@ def main() -> None:
         help="folder containing train.csv / val.csv / test.csv",
     )
     p.add_argument("--context-len", type=int, default=96, help="window length in rows (Δt steps)")
-    p.add_argument("--horizon-steps", type=int, default=1, help="0=last step in window; 1=one step after window")
+    p.add_argument(
+        "--horizon-steps",
+        type=int,
+        default=0,
+        help="shift applied before the future horizon (0=starts at one-step-ahead; 1=skip one step, etc.)",
+    )
+    p.add_argument(
+        "--pred-len",
+        type=int,
+        default=48,
+        help="number of future steps in the prediction horizon (e.g. 48 = 1 day @ 30min)",
+    )
     p.add_argument("--stride", type=int, default=1, help="sliding window stride in rows")
+    p.add_argument(
+        "--max-gap-steps",
+        type=int,
+        default=None,
+        help="if set, drop windows where any consecutive DateTime gap exceeds this many steps",
+    )
     p.add_argument(
         "--keep-nan-targets",
         action="store_true",
@@ -52,7 +69,7 @@ def main() -> None:
     if not norm_dir.is_dir():
         raise SystemExit(f"Missing normalized split dir: {norm_dir}")
 
-    out_root = norm_dir / f"windowed_L{args.context_len}_H{args.horizon_steps}_S{args.stride}"
+    out_root = norm_dir / f"windowed_L{args.context_len}_H{args.horizon_steps}_P{args.pred_len}_S{args.stride}"
     out_root.mkdir(parents=True, exist_ok=True)
 
     pack = {
@@ -78,11 +95,15 @@ def main() -> None:
             out_npz=npz_path,
             context_len=args.context_len,
             horizon_steps=args.horizon_steps,
+            pred_len=args.pred_len,
             stride=args.stride,
             skip_nan_target=not args.keep_nan_targets,
+            max_gap_steps=args.max_gap_steps,
         )
         build_windows_to_npz(cfg, {**pack, "split": sp})
-        print(f"Wrote {npz_path} ({cfg.context_len=}, {cfg.horizon_steps=}, {cfg.stride=})")
+        print(
+            f"Wrote {npz_path} ({cfg.context_len=}, {cfg.horizon_steps=}, {cfg.pred_len=}, {cfg.stride=})"
+        )
 
 
 if __name__ == "__main__":

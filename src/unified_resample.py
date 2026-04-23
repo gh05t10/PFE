@@ -93,6 +93,7 @@ class UnifiedResampleConfig:
     agg: Literal["median", "mean"] = "median"
     rule_a: bool = False
     rule_a_p: float = 0.8
+    gt_weights_csv: Path | None = None
 
 
 def resample_panel(df: pd.DataFrame, *, freq: str, agg: Literal["median", "mean"] = "median") -> pd.DataFrame:
@@ -120,6 +121,42 @@ def resample_panel(df: pd.DataFrame, *, freq: str, agg: Literal["median", "mean"
     return out
 
 
+def _load_gt_weights(path: Path) -> pd.DataFrame:
+    """
+    Load shallow Chl GT weights table (e.g. ``chl_shallow_transformer_gt.csv``).
+    Expected columns: DateTime, weight_chl_gt (and optionally weight_chl_gt_conservative).
+    """
+    g = pd.read_csv(path, parse_dates=["DateTime"], low_memory=False)
+    g = g.sort_values("DateTime").drop_duplicates(subset=["DateTime"], keep="first")
+    cols = [c for c in g.columns if c.startswith("weight_chl_gt")]
+    if not cols:
+        raise ValueError(f"No weight_chl_gt* columns in {path}")
+    g = g[["DateTime", *cols]].copy()
+    for c in cols:
+        g[c] = pd.to_numeric(g[c], errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
+    return g
+
+
+def resample_gt_weights(gt: pd.DataFrame, *, freq: str, agg: Literal["median", "mean"] = "mean") -> pd.DataFrame:
+    """
+    Resample weights onto the same grid as values.
+
+    We aggregate weights by **mean** within bin (i.e. expected reliability mass in that bin).
+    This preserves partial coverage in a bin when some raw points are flagged as spikes.
+    """
+    validate_freq(freq)
+    d = gt.sort_values("DateTime").drop_duplicates(subset=["DateTime"], keep="first")
+    work = pd.DataFrame(index=pd.DatetimeIndex(d["DateTime"]))
+    wcols = [c for c in d.columns if c.startswith("weight_chl_gt")]
+    for c in wcols:
+        work[c] = pd.to_numeric(d[c], errors="coerce").values
+    work = work.sort_index()
+    w = work.resample(freq, label="right", closed="right").agg(agg)
+    w = w.rename(columns={c: f"{c}_resampled" for c in w.columns})
+    w.index.name = "DateTime"
+    return w
+
+
 def run_unified_resample(cfg: UnifiedResampleConfig) -> Path:
     """Write ``soft_sensor_resampled.csv`` + ``resample_meta.txt`` under ``out_dir``."""
     freq = validate_freq(cfg.freq)
@@ -131,6 +168,10 @@ def run_unified_resample(cfg: UnifiedResampleConfig) -> Path:
     if cfg.rule_a:
         raw = filter_rows_to_rule_a_months(raw, cfg.data_dir, p=cfg.rule_a_p)
     panel = resample_panel(raw, freq=freq, agg=cfg.agg)
+    if cfg.gt_weights_csv is not None and Path(cfg.gt_weights_csv).is_file():
+        gt = _load_gt_weights(Path(cfg.gt_weights_csv))
+        w = resample_gt_weights(gt, freq=freq, agg="mean")
+        panel = panel.join(w, how="left")
 
     csv_path = out_dir / "soft_sensor_resampled.csv"
     panel.reset_index().to_csv(csv_path, index=False)
@@ -142,6 +183,7 @@ def run_unified_resample(cfg: UnifiedResampleConfig) -> Path:
         f"aggregation={cfg.agg}",
         f"rule_a_filter={cfg.rule_a}",
         f"rule_a_p={cfg.rule_a_p}",
+        f"gt_weights_csv={str(cfg.gt_weights_csv) if cfg.gt_weights_csv is not None else ''}",
         f"feature_cols={list(FEATURE_COLS)}",
         f"target_col={TARGET_COL}",
         f"n_rows={len(panel)}",

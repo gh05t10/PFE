@@ -1,7 +1,11 @@
 """
 Simple baseline models for shallow-Chl soft sensor.
 
-Current default: GRU-based sequence-to-one regressor on z-scored inputs.
+Current default: GRU-based regressor on z-scored inputs.
+
+Supports both:
+- sequence-to-one (pred_len=1)
+- sequence-to-vector (pred_len>1), outputting a multi-step horizon vector
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ class GRUBaselineConfig:
     hidden_dim: int = 64
     num_layers: int = 2
     dropout: float = 0.1
+    pred_len: int = 1
 
 
 class GRUBaseline(nn.Module):
@@ -38,20 +43,24 @@ class GRUBaseline(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
             nn.ReLU(),
-            nn.Linear(cfg.hidden_dim, 1),
+            nn.Linear(cfg.hidden_dim, cfg.pred_len),
         )
 
     def forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
         """
         x: (B, L, C), x_mask: (B, L, C) True=valid.
-        Returns y_pred_z: (B,)
+        Returns y_pred_z:
+          - (B,) if pred_len==1
+          - (B, H) if pred_len==H>1
         """
         # Invalid positions must be 0 without multiplying NaN*0 (PyTorch keeps NaN).
         x_valid = torch.where(x_mask, x, torch.zeros_like(x))
         out, h_n = self.gru(x_valid)
         # Use last hidden state from top layer
         last_h = h_n[-1]  # (B, hidden_dim)
-        y = self.head(last_h).squeeze(-1)
+        y = self.head(last_h)  # (B, pred_len) or (B,1)
+        if self.cfg.pred_len == 1:
+            return y.squeeze(-1)
         return y
 
 

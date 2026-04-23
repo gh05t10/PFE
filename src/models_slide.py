@@ -3,9 +3,9 @@ Slide-inspired architecture (Aquaculture-report17_1.pdf ~pages 9–10):
 
   - **Calibration / teacher:** 6 channels (5 water + Chl_z along the window) → patch embed → Transformer encoder → **K, V**.
   - **Soft-sensor:** 5 channels → patch embed → Transformer encoder → **Q**.
-  - **Cross-attention:** Q attends to K, V; pooled → MLP head → scalar Chl (z-space).
+  - **Cross-attention:** Q attends to K, V; pooled → MLP head → multi-step Chl horizon (z-space).
 
-Training uses full ``X6_z`` (teacher). Inference without Chl is not implemented here (would need a separate forward or masking strategy).
+Training uses full ``X6_z`` (teacher). Inference without Chl is not implemented for teacher (use student models).
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ class SlidePatchCrossAttnConfig:
     # Student-only (setup B): build K/V from x5 only (no Chl in-window).
     kv_encoder_layers: int | None = None  # default: same as encoder_layers
     share_q_kv_encoder: bool = False
+    pred_len: int = 1
 
 
 class SlidePatchCrossAttn(nn.Module):
@@ -43,14 +44,21 @@ class SlidePatchCrossAttn(nn.Module):
         self.embed5 = nn.Linear(pl * cfg.n_vars5, dm)
         self.embed6 = nn.Linear(pl * cfg.n_vars6, dm)
 
+        def _enc(layer: nn.TransformerEncoderLayer, n: int) -> nn.TransformerEncoder:
+            # NestedTensor path is still prototype in PyTorch and can yield NaNs in backward on some setups.
+            try:
+                return nn.TransformerEncoder(layer, num_layers=n, enable_nested_tensor=False)
+            except TypeError:
+                return nn.TransformerEncoder(layer, num_layers=n)
+
         el5 = nn.TransformerEncoderLayer(dm, nh, df, drop, batch_first=True)
         el6 = nn.TransformerEncoderLayer(dm, nh, df, drop, batch_first=True)
-        self.enc5 = nn.TransformerEncoder(el5, num_layers=cfg.encoder_layers)
-        self.enc6 = nn.TransformerEncoder(el6, num_layers=cfg.encoder_layers)
+        self.enc5 = _enc(el5, cfg.encoder_layers)
+        self.enc6 = _enc(el6, cfg.encoder_layers)
 
         self.cross = nn.MultiheadAttention(dm, nh, dropout=drop, batch_first=True)
         self.norm = nn.LayerNorm(dm)
-        self.head = nn.Sequential(nn.Linear(dm, dm), nn.ReLU(), nn.Linear(dm, 1))
+        self.head = nn.Sequential(nn.Linear(dm, dm), nn.ReLU(), nn.Linear(dm, cfg.pred_len))
 
     @staticmethod
     def _fold(
@@ -96,7 +104,9 @@ class SlidePatchCrossAttn(nn.Module):
     ) -> torch.Tensor:
         """
         x5, mask5: (B, L, 5); x6, mask6: (B, L, 6).
-        Returns ŷ_z: (B,).
+        Returns ŷ_z:
+          - (B,) if pred_len==1
+          - (B, H) if pred_len==H>1
         """
         pl = self.cfg.patch_len
         x5p, v5 = self._fold(x5, mask5, pl)
@@ -113,7 +123,10 @@ class SlidePatchCrossAttn(nn.Module):
         attn_out, _ = self.cross(h5, h6, h6, key_padding_mask=pad6_k)
         out = self.norm(attn_out + h5)
         pooled = out.mean(dim=1)
-        return self.head(pooled).squeeze(-1)
+        y = self.head(pooled)
+        if self.cfg.pred_len == 1:
+            return y.squeeze(-1)
+        return y
 
 
 class SlideStudentCrossAttn(nn.Module):
@@ -136,19 +149,25 @@ class SlideStudentCrossAttn(nn.Module):
         self.embed5_q = nn.Linear(pl * cfg.n_vars5, dm)
         self.embed5_kv = nn.Linear(pl * cfg.n_vars5, dm)
 
+        def _enc(layer: nn.TransformerEncoderLayer, n: int) -> nn.TransformerEncoder:
+            try:
+                return nn.TransformerEncoder(layer, num_layers=n, enable_nested_tensor=False)
+            except TypeError:
+                return nn.TransformerEncoder(layer, num_layers=n)
+
         el_q = nn.TransformerEncoderLayer(dm, nh, df, drop, batch_first=True)
-        self.enc_q = nn.TransformerEncoder(el_q, num_layers=cfg.encoder_layers)
+        self.enc_q = _enc(el_q, cfg.encoder_layers)
 
         if cfg.share_q_kv_encoder:
             self.enc_kv = self.enc_q
         else:
             kv_layers = cfg.kv_encoder_layers if cfg.kv_encoder_layers is not None else cfg.encoder_layers
             el_kv = nn.TransformerEncoderLayer(dm, nh, df, drop, batch_first=True)
-            self.enc_kv = nn.TransformerEncoder(el_kv, num_layers=kv_layers)
+            self.enc_kv = _enc(el_kv, kv_layers)
 
         self.cross = nn.MultiheadAttention(dm, nh, dropout=drop, batch_first=True)
         self.norm = nn.LayerNorm(dm)
-        self.head = nn.Sequential(nn.Linear(dm, dm), nn.ReLU(), nn.Linear(dm, 1))
+        self.head = nn.Sequential(nn.Linear(dm, dm), nn.ReLU(), nn.Linear(dm, cfg.pred_len))
 
     @staticmethod
     def _fold(
@@ -165,7 +184,9 @@ class SlideStudentCrossAttn(nn.Module):
     def forward(self, x5: torch.Tensor, mask5: torch.Tensor) -> torch.Tensor:
         """
         x5, mask5: (B, L, 5).
-        Returns ŷ_z: (B,).
+        Returns ŷ_z:
+          - (B,) if pred_len==1
+          - (B, H) if pred_len==H>1
         """
         pl = self.cfg.patch_len
         x5p, v5 = self._fold(x5, mask5, pl)
@@ -180,15 +201,18 @@ class SlideStudentCrossAttn(nn.Module):
         attn_out, _ = self.cross(q, kv, kv, key_padding_mask=pad_k)
         out = self.norm(attn_out + q)
         pooled = out.mean(dim=1)
-        return self.head(pooled).squeeze(-1)
+        y = self.head(pooled)
+        if self.cfg.pred_len == 1:
+            return y.squeeze(-1)
+        return y
 
 
 class SlideStudentResidual(nn.Module):
     """
     Setup B + residual: deployable student predicts
       - current Chl at window end: y_end_hat_z (from x5 only)
-      - delta to horizon: delta_hat_z
-    and returns y_future_hat_z = y_end_hat_z + delta_hat_z.
+      - delta to horizon (multi-step): delta_hat_z
+    and returns y_future_hat_z = y_end_hat_z + delta_hat_z (broadcast over horizon).
     """
 
     def __init__(self, cfg: SlidePatchCrossAttnConfig) -> None:
@@ -203,21 +227,27 @@ class SlideStudentResidual(nn.Module):
         self.embed5_q = nn.Linear(pl * cfg.n_vars5, dm)
         self.embed5_kv = nn.Linear(pl * cfg.n_vars5, dm)
 
+        def _enc(layer: nn.TransformerEncoderLayer, n: int) -> nn.TransformerEncoder:
+            try:
+                return nn.TransformerEncoder(layer, num_layers=n, enable_nested_tensor=False)
+            except TypeError:
+                return nn.TransformerEncoder(layer, num_layers=n)
+
         el_q = nn.TransformerEncoderLayer(dm, nh, df, drop, batch_first=True)
-        self.enc_q = nn.TransformerEncoder(el_q, num_layers=cfg.encoder_layers)
+        self.enc_q = _enc(el_q, cfg.encoder_layers)
 
         if cfg.share_q_kv_encoder:
             self.enc_kv = self.enc_q
         else:
             kv_layers = cfg.kv_encoder_layers if cfg.kv_encoder_layers is not None else cfg.encoder_layers
             el_kv = nn.TransformerEncoderLayer(dm, nh, df, drop, batch_first=True)
-            self.enc_kv = nn.TransformerEncoder(el_kv, num_layers=kv_layers)
+            self.enc_kv = _enc(el_kv, kv_layers)
 
         self.cross = nn.MultiheadAttention(dm, nh, dropout=drop, batch_first=True)
         self.norm = nn.LayerNorm(dm)
 
         self.head_end = nn.Sequential(nn.Linear(dm, dm), nn.ReLU(), nn.Linear(dm, 1))
-        self.head_delta = nn.Sequential(nn.Linear(dm, dm), nn.ReLU(), nn.Linear(dm, 1))
+        self.head_delta = nn.Sequential(nn.Linear(dm, dm), nn.ReLU(), nn.Linear(dm, cfg.pred_len))
 
     @staticmethod
     def _fold(x: torch.Tensor, mask: torch.Tensor, patch_len: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -229,7 +259,10 @@ class SlideStudentResidual(nn.Module):
 
     def forward(self, x5: torch.Tensor, mask5: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Returns (y_future_hat_z, y_end_hat_z, delta_hat_z), each (B,).
+        Returns:
+          - y_future_hat_z: (B,) if pred_len==1 else (B,H)
+          - y_end_hat_z: (B,) (scalar end estimate)
+          - delta_hat_z: (B,) if pred_len==1 else (B,H)
         """
         pl = self.cfg.patch_len
         x5p, v5 = self._fold(x5, mask5, pl)
@@ -246,8 +279,11 @@ class SlideStudentResidual(nn.Module):
         pooled = out.mean(dim=1)
 
         y_end = self.head_end(pooled).squeeze(-1)
-        delta = self.head_delta(pooled).squeeze(-1)
-        return y_end + delta, y_end, delta
+        delta = self.head_delta(pooled)
+        if self.cfg.pred_len == 1:
+            delta = delta.squeeze(-1)
+            return y_end + delta, y_end, delta
+        return y_end[:, None] + delta, y_end, delta
 
 
 __all__ = [

@@ -36,35 +36,73 @@ def inverse_target_from_json(z: np.ndarray, scaler_json: Path) -> np.ndarray:
     return z * std + mu
 
 
+def _torch_load_trusted(path: Path, device: torch.device) -> dict:
+    """
+    PyTorch 2.6+ defaults `weights_only=True`, which can fail when our checkpoint
+    includes non-tensor metadata (e.g. Paths / argparse namespaces). We only load checkpoints we wrote.
+    """
+    try:
+        return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
 def eval_epoch(model: nn.Module, loader: DataLoader, device: torch.device, scaler_json: Path) -> dict[str, float]:
     model.eval()
     se = []
     ae = []
+    n_valid = 0
     with torch.no_grad():
         for batch in loader:
             x = batch["x"].to(device)
             x_mask = batch["x_mask"].to(device)
-            y = batch["y"].to(device)
-            y_mask = batch["y_mask"].to(device)
+            y = batch.get("y_seq")
+            y_mask = batch.get("y_seq_mask")
+            if y is None or y_mask is None:
+                y = batch["y"]
+                y_mask = batch["y_mask"]
+            y = y.to(device)
+            y_mask = y_mask.to(device)
 
             valid = y_mask & torch.isfinite(y)
+            pred = model(x, x_mask)
+            valid = valid & torch.isfinite(pred)
             if valid.sum() == 0:
                 continue
-            y = y[valid]
-            pred = model(x, x_mask)[valid]
 
-            y_np = y.detach().cpu().numpy()
-            p_np = pred.detach().cpu().numpy()
+            y_np = y[valid].detach().cpu().numpy()
+            p_np = pred[valid].detach().cpu().numpy()
             y_raw = inverse_target_from_json(y_np, scaler_json)
             p_raw = inverse_target_from_json(p_np, scaler_json)
-            se.append((p_raw - y_raw) ** 2)
-            ae.append(np.abs(p_raw - y_raw))
+            e = p_raw - y_raw
+            ok = np.isfinite(e)
+            if ok.sum() == 0:
+                continue
+            se.append((e[ok]) ** 2)
+            ae.append(np.abs(e[ok]))
+            n_valid += int(ok.sum())
 
     if not se:
-        return {"rmse": float("nan"), "mae": float("nan")}
+        return {"rmse": float("nan"), "mae": float("nan"), "n_valid": 0}
     se_all = np.concatenate(se)
     ae_all = np.concatenate(ae)
-    return {"rmse": float(np.sqrt(se_all.mean())), "mae": float(ae_all.mean())}
+    return {"rmse": float(np.sqrt(se_all.mean())), "mae": float(ae_all.mean()), "n_valid": int(n_valid)}
+
+
+def weighted_mse(pred: torch.Tensor, y: torch.Tensor, w: torch.Tensor | None, mask: torch.Tensor) -> torch.Tensor:
+    """
+    pred/y: (B,) or (B,H); w: same shape or None; mask: bool same shape.
+    """
+    if w is None:
+        err2 = (pred - y) ** 2
+        return err2[mask].mean()
+    ww = torch.where(torch.isfinite(w), w, torch.zeros_like(w)).clamp(min=0.0)
+    mask2 = mask & (ww > 0)
+    if mask2.sum() == 0:
+        return torch.tensor(float("nan"), device=pred.device)
+    num = ((pred - y) ** 2)[mask2] * ww[mask2]
+    den = ww[mask2].sum().clamp_min(1e-12)
+    return num.sum() / den
 
 
 def main() -> None:
@@ -177,7 +215,10 @@ def main() -> None:
         else None
     )
 
-    cfg = GRUBaselineConfig()
+    # Infer pred_len from NPZ if available (multi-step), else legacy scalar.
+    tmp = np.load(train_npz, allow_pickle=False)
+    pred_len = int(tmp["Y_z"].shape[1]) if "Y_z" in tmp.files else 1
+    cfg = GRUBaselineConfig(pred_len=pred_len)
     model = GRUBaseline(cfg).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.MSELoss()
@@ -203,7 +244,15 @@ def main() -> None:
     with open(log_csv, "w", newline="", encoding="utf-8") as fcsv:
         w = csv.DictWriter(
             fcsv,
-            fieldnames=["epoch", "train_mse_z", "val_rmse_chl", "val_mae_chl", "lr", "seconds"],
+            fieldnames=[
+                "epoch",
+                "train_mse_z",
+                "val_rmse_chl",
+                "val_mae_chl",
+                "val_n_valid",
+                "lr",
+                "seconds",
+            ],
         )
         w.writeheader()
 
@@ -215,8 +264,17 @@ def main() -> None:
             for batch in train_loader:
                 x = batch["x"].to(device)
                 x_mask = batch["x_mask"].to(device)
-                y = batch["y"].to(device)
-                y_mask = batch["y_mask"].to(device)
+                y = batch.get("y_seq")
+                y_mask = batch.get("y_seq_mask")
+                y_w = batch.get("y_seq_w")
+                if y is None or y_mask is None:
+                    y = batch["y"]
+                    y_mask = batch["y_mask"]
+                    y_w = batch.get("y_w")
+                y = y.to(device)
+                y_mask = y_mask.to(device)
+                if y_w is not None:
+                    y_w = y_w.to(device)
 
                 valid = y_mask & torch.isfinite(y)
                 if valid.sum() == 0:
@@ -224,8 +282,24 @@ def main() -> None:
 
                 opt.zero_grad()
                 pred = model(x, x_mask)
-                loss = loss_fn(pred[valid], y[valid])
+                if not torch.isfinite(pred).any().item():
+                    continue
+                loss = weighted_mse(pred, y, y_w, valid)
+                if not torch.isfinite(loss).item():
+                    # Can happen if all weights are zero in this batch.
+                    continue
                 loss.backward()
+                # Guard against NaN/Inf gradients
+                bad_grad = False
+                for p in model.parameters():
+                    if p.grad is None:
+                        continue
+                    if not torch.isfinite(p.grad).all().item():
+                        bad_grad = True
+                        break
+                if bad_grad:
+                    opt.zero_grad(set_to_none=True)
+                    continue
                 if args.grad_clip and args.grad_clip > 0:
                     nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
                 opt.step()
@@ -244,6 +318,7 @@ def main() -> None:
                     "train_mse_z": f"{avg_loss:.6f}",
                     "val_rmse_chl": f"{metrics['rmse']:.6f}",
                     "val_mae_chl": f"{metrics['mae']:.6f}",
+                    "val_n_valid": int(metrics.get("n_valid", 0)),
                     "lr": f"{lr_now:.8f}",
                     "seconds": f"{dt:.2f}",
                 }
@@ -252,7 +327,8 @@ def main() -> None:
 
             print(
                 f"Epoch {epoch:02d}: train_MSE_z={avg_loss:.4f}, "
-                f"val_RMSE_Chl={metrics['rmse']:.4f}, val_MAE_Chl={metrics['mae']:.4f}, lr={lr_now:.2e}"
+                f"val_RMSE_Chl={metrics['rmse']:.4f}, val_MAE_Chl={metrics['mae']:.4f}, "
+                f"val_n_valid={int(metrics.get('n_valid', 0))}, lr={lr_now:.2e}"
             )
 
             improved = np.isfinite(metrics["rmse"]) and (
@@ -310,7 +386,7 @@ def main() -> None:
     (ckpt_dir / "train_config.json").write_text(json.dumps(train_config, indent=2, default=str), encoding="utf-8")
 
     if test_loader is not None and best_path.is_file():
-        checkpoint = torch.load(best_path, map_location=device)
+        checkpoint = _torch_load_trusted(best_path, device)
         model.load_state_dict(checkpoint["model_state"])
         test_m = eval_epoch(model, test_loader, device, scaler_json)
         summary = {
@@ -319,6 +395,7 @@ def main() -> None:
             "val_mae_chl": best_val_mae,
             "test_rmse_chl": test_m["rmse"],
             "test_mae_chl": test_m["mae"],
+            "test_n_valid": int(test_m.get("n_valid", 0)),
             "checkpoint": str(best_path.resolve()),
             "stopped_reason": stopped_reason,
         }

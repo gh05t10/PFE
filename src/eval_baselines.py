@@ -5,6 +5,9 @@ Naive baselines on the same windowed samples as GRU (same NPZ, same scaler).
 - **persistence**: predict y_hat_z = chl_z_at_window_end (last known Chl in window before target).
 
 Metrics in Chl RFU via inverse transform from scaler_params.json.
+
+Multi-step support:
+- If ``Y_z`` / ``Y_mask`` exist, evaluate metrics on the flattened valid elements across horizon.
 """
 
 from __future__ import annotations
@@ -36,6 +39,27 @@ def rmse_mae_rf(y_true_rf: np.ndarray, y_pred_rf: np.ndarray) -> dict[str, float
     }
 
 
+def _load_y_any(npz: np.lib.npyio.NpzFile) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Return (y, mask).
+
+    - Multi-step: y shape (N, H) from Y_z and Y_mask
+    - Legacy:     y shape (N,) from y_z and y_mask
+    """
+    if "Y_z" in npz.files:
+        y = npz["Y_z"].astype(np.float64)
+        m = npz["Y_mask"].astype(bool) if "Y_mask" in npz.files else np.isfinite(y)
+        return y, m & np.isfinite(y)
+    y = npz["y_z"].astype(np.float64)
+    m = npz["y_mask"].astype(bool) if "y_mask" in npz.files else np.ones(len(y), dtype=bool)
+    return y, m & np.isfinite(y)
+
+
+def _flatten_valid(y: np.ndarray, pred: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    # Works for both 1D and 2D (numpy boolean indexing flattens).
+    return y[valid], pred[valid]
+
+
 def eval_mean_train_baseline(
     train_npz: Path,
     val_or_test_npz: Path,
@@ -43,17 +67,15 @@ def eval_mean_train_baseline(
 ) -> dict[str, Any]:
     tr = np.load(train_npz, allow_pickle=False)
     va = np.load(val_or_test_npz, allow_pickle=False)
-    y_tr = tr["y_z"].astype(np.float64)
-    m_tr = tr["y_mask"].astype(bool) if "y_mask" in tr.files else np.ones(len(y_tr), dtype=bool)
-    finite_tr = m_tr & np.isfinite(y_tr)
-    mean_z = float(np.nanmean(y_tr[finite_tr]))
+    y_tr, m_tr = _load_y_any(tr)
+    mean_z = float(np.nanmean(y_tr[m_tr]))
 
-    y = va["y_z"].astype(np.float64)
-    m = va["y_mask"].astype(bool) if "y_mask" in va.files else np.ones(len(y), dtype=bool)
-    valid = m & np.isfinite(y)
+    y, m = _load_y_any(va)
     pred_z = np.full_like(y, mean_z)
+    valid = m & np.isfinite(pred_z)
     mu, std = load_scaler_target(scaler_json)
-    out = rmse_mae_rf(z_to_rf(y[valid], mu, std), z_to_rf(pred_z[valid], mu, std))
+    yt, yp = _flatten_valid(y, pred_z, valid)
+    out = rmse_mae_rf(z_to_rf(yt, mu, std), z_to_rf(yp, mu, std))
     out["method"] = "mean_train_z"
     out["mean_z_used"] = mean_z
     return out
@@ -69,14 +91,19 @@ def eval_persistence_baseline(
             "method": "persistence_window_end",
             "error": "NPZ missing chl_z_at_window_end — re-run run_build_window_dataset.py",
         }
-    y = va["y_z"].astype(np.float64)
-    pred_z = va["chl_z_at_window_end"].astype(np.float64)
-    m = va["y_mask"].astype(bool) if "y_mask" in va.files else np.ones(len(y), dtype=bool)
-    valid = m & np.isfinite(y) & np.isfinite(pred_z)
+    y, m = _load_y_any(va)
+    end = va["chl_z_at_window_end"].astype(np.float64)
+    if y.ndim == 1:
+        pred_z = end
+        valid = m & np.isfinite(y) & np.isfinite(pred_z)
+    else:
+        pred_z = np.repeat(end[:, None], y.shape[1], axis=1)
+        valid = m & np.isfinite(y) & np.isfinite(pred_z)
     if valid.sum() == 0:
         return {"method": "persistence_window_end", "error": "no valid samples"}
     mu, std = load_scaler_target(scaler_json)
-    out = rmse_mae_rf(z_to_rf(y[valid], mu, std), z_to_rf(pred_z[valid], mu, std))
+    yt, yp = _flatten_valid(y, pred_z, valid)
+    out = rmse_mae_rf(z_to_rf(yt, mu, std), z_to_rf(yp, mu, std))
     out["method"] = "persistence_window_end"
     return out
 
