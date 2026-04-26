@@ -113,8 +113,13 @@ def predict_npz(
 def main() -> None:
     p = argparse.ArgumentParser(description="Evaluate hard-calibration protocol (predict 14d, calib 1d).")
     p.add_argument("--window-dir", type=Path, required=True, help="windowed_L*_H*_P*_S* folder")
-    p.add_argument("--ckpt", type=Path, required=True, help="teacher best_slide*.pt or student best_student.pt")
-    p.add_argument("--kind", choices=("teacher", "student"), default="teacher")
+    p.add_argument(
+        "--ckpt",
+        type=Path,
+        default=None,
+        help="teacher best_slide*.pt or student best_student.pt (required for kind=teacher/student)",
+    )
+    p.add_argument("--kind", choices=("teacher", "student", "persistence", "mean_train"), default="teacher")
     p.add_argument("--split", choices=("val", "test"), default="val")
     p.add_argument("--pred-len", type=int, default=672, help="14 days @30min = 672")
     p.add_argument("--calib-len", type=int, default=48, help="1 day @30min = 48")
@@ -126,8 +131,37 @@ def main() -> None:
     if not npz.is_file():
         raise SystemExit(f"Missing {npz}")
 
-    model = load_model(ckpt_path=args.ckpt, device=device, kind=args.kind, pred_len=args.pred_len)
-    y_true, y_pred, w, m = predict_npz(npz_path=npz, model=model, device=device, kind=args.kind)
+    if args.kind in ("teacher", "student"):
+        if args.ckpt is None:
+            raise SystemExit("--ckpt is required for kind=teacher/student")
+        model = load_model(ckpt_path=args.ckpt, device=device, kind=args.kind, pred_len=args.pred_len)
+        y_true, y_pred, w, m = predict_npz(npz_path=npz, model=model, device=device, kind=args.kind)
+    else:
+        # baseline kinds run directly from NPZ
+        d = np.load(npz, allow_pickle=False)
+        if "Y_z" not in d.files or "Y_mask" not in d.files:
+            raise SystemExit("NPZ must contain Y_z/Y_mask.")
+        y_true = d["Y_z"].astype(np.float32)
+        m = d["Y_mask"].astype(bool)
+        w = d["Y_w"].astype(np.float32) if "Y_w" in d.files else None
+        if args.kind == "persistence":
+            if "chl_z_at_window_end" not in d.files:
+                raise SystemExit("NPZ missing chl_z_at_window_end.")
+            ce = d["chl_z_at_window_end"].astype(np.float32)
+            y_pred = np.repeat(ce[:, None], y_true.shape[1], axis=1)
+        elif args.kind == "mean_train":
+            tr = np.load(args.window_dir / "train.npz", allow_pickle=False)
+            if "Y_z" in tr.files:
+                yt = tr["Y_z"].astype(np.float64)
+                mt = tr["Y_mask"].astype(bool) if "Y_mask" in tr.files else np.isfinite(yt)
+                mu = float(np.nanmean(yt[mt]))
+            else:
+                yt = tr["y_z"].astype(np.float64)
+                mt = tr["y_mask"].astype(bool) if "y_mask" in tr.files else np.isfinite(yt)
+                mu = float(np.nanmean(yt[mt]))
+            y_pred = np.full_like(y_true, mu, dtype=np.float32)
+        else:
+            raise SystemExit(args.kind)
 
     cfg = CalibrationConfig(pred_len=args.pred_len, calib_len=args.calib_len)
     rep = simulate_daily_calibration(y_true=y_true, y_pred=y_pred, mask=m, weights=w, cfg=cfg)
@@ -136,7 +170,7 @@ def main() -> None:
         "window_dir": str(args.window_dir.resolve()),
         "split": args.split,
         "kind": args.kind,
-        "ckpt": str(args.ckpt.resolve()),
+        "ckpt": str(args.ckpt.resolve()) if args.ckpt is not None else "",
         "cfg": {"pred_len": cfg.pred_len, "calib_len": cfg.calib_len, "update": cfg.update},
         "baseline": rep.baseline,
         "calibrated": rep.calibrated,

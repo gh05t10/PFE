@@ -1,0 +1,24 @@
+{
+  "window_dir": "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/windowed_L96_H0_P672_S48",
+  "split": "test",
+  "ckpt": "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/windowed_L96_H0_P672_S48/checkpoints_slide/best_slide.pt",
+  "scaler_json": "/home/peter/PFE/processed/chl_shallow/resampled_30min/normalized_split/scaler_params.json",
+  "model_config": {
+    "patch_len": 16,
+    "d_model": 64,
+    "nhead": 4,
+    "encoder_layers": 2,
+    "dropout": 0.1,
+    "n_vars5": 5,
+    "n_vars6": 6,
+    "kv_encoder_layers": null,
+    "share_q_kv_encoder": false,
+    "pred_len": 672
+  },
+  "outputs": [
+    "fig_block_rmse_test.pdf",
+    "fig_forecast_examples_test.pdf",
+    "fig_rmse_by_horizon_test.pdf",
+    "fig_training_curve_slide.pdf"
+  ]
+}
