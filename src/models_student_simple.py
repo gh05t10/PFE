@@ -18,7 +18,7 @@ class GRUStudentConfig:
 class GRUStudent(nn.Module):
     """
     Simple deployable student: GRU over X5 -> horizon vector in z-space.
-    Designed to be numerically stable for long horizons (e.g. 1440).
+    Designed to be numerically stable for long multi-step horizons.
     """
 
     def __init__(self, cfg: GRUStudentConfig) -> None:
