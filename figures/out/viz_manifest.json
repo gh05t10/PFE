@@ -16,6 +16,7 @@
     "pred_len": 672
   },
   "outputs": [
+    "daily_horizon_rmse_test.json",
     "fig_block_rmse_test.pdf",
     "fig_forecast_examples_test.pdf",
     "fig_rmse_by_horizon_test.pdf",

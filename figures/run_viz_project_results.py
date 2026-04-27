@@ -5,7 +5,8 @@ Generate key visualizations for the project (forecast examples + error curves).
 Outputs (PDF + PNG) under: figures/out/
   - fig_forecast_examples_test.pdf/png
   - fig_rmse_by_horizon_test.pdf/png
-  - fig_block_rmse_test.pdf/png
+  - fig_block_rmse_test.pdf/png  (RMSE by **forecast day**: 1 day = 48 steps @30min)
+  - daily_horizon_rmse_{split}.json — same curves as numeric table for slides
   - fig_training_curve_slide.pdf/png
 
 Designed to be slide-friendly and reproducible.
@@ -36,6 +37,18 @@ def _load_scaler(scaler_json: Path) -> tuple[float, float]:
 
 def _unz(z: np.ndarray, mu: float, std: float) -> np.ndarray:
     return z * std + mu
+
+
+def _json_float_list(arr: np.ndarray) -> list[float | None]:
+    """JSON-safe: NaN/inf become null."""
+    out: list[float | None] = []
+    for x in np.asarray(arr).ravel():
+        xf = float(x)
+        if not np.isfinite(xf):
+            out.append(None)
+        else:
+            out.append(xf)
+    return out
 
 
 def _torch_load_trusted(path: Path, device: torch.device) -> dict[str, Any]:
@@ -315,14 +328,39 @@ def main() -> None:
     ax.plot(days, blk_teacher, marker="o", color="#E9C46A", label="Teacher")
     ax.plot(days, blk_teacher_cal, marker="o", color="#E76F51", label="Teacher + calib")
     ax.set_xticks(days)
-    ax.set_xlabel("Calibration block (day)")
+    ax.set_xlabel("Forecast day index k (each day = 48 steps @30 min)")
     ax.set_ylabel("RMSE (z)")
-    ax.set_title("Test RMSE by day-block (calib_len=48 steps)")
+    ax.set_title("Test RMSE by forecast day (48 steps/day; pooled weighted RMSE)")
     ax.legend(ncol=2, loc="upper right")
     fig.tight_layout()
     fig.savefig(out_dir / "fig_block_rmse_test.pdf")
     fig.savefig(out_dir / "fig_block_rmse_test.png", dpi=300)
     plt.close(fig)
+
+    # -------- Table: same per-day RMSE as JSON (option "1": daily reporting, 30-min targets) --------
+    daily_payload = {
+        "schema": "forecast_day_k_starts_at_day_1_ahead",
+        "resolution": "30min",
+        "steps_per_calendar_day": calib_len,
+        "pred_len_steps": H,
+        "num_forecast_days": int(len(blk_teacher)),
+        "note": (
+            "Targets remain 30-minute Chl (z). Each forecast_day_index k aggregates errors "
+            "over steps [ (k-1)*steps_per_calendar_day , min(k*steps_per_calendar_day, H) ). "
+            "Aligned with calibration blocks of length calib_len."
+        ),
+        "rmse_z": {
+            "persistence": _json_float_list(blk_persist),
+            "persistence_calibrated": _json_float_list(blk_persist_cal),
+            "teacher": _json_float_list(blk_teacher),
+            "teacher_calibrated": _json_float_list(blk_teacher_cal),
+        },
+        "forecast_day_index": list(range(1, len(blk_teacher) + 1)),
+    }
+    (out_dir / f"daily_horizon_rmse_{split}.json").write_text(
+        json.dumps(daily_payload, indent=2),
+        encoding="utf-8",
+    )
 
     # -------- Figure 4: training curve (from metrics CSV) --------
     metrics_csv = window_dir / "checkpoints_slide/metrics_slide.csv"
@@ -363,7 +401,10 @@ def main() -> None:
         "ckpt": str(ckpt_path),
         "scaler_json": str(scaler_json),
         "model_config": asdict(cfg),
-        "outputs": sorted([p.name for p in out_dir.glob("fig_*.pdf")]),
+        "outputs": sorted(
+            [p.name for p in out_dir.glob("fig_*.pdf")]
+            + [p.name for p in out_dir.glob("daily_horizon_rmse_*.json")]
+        ),
     }
     (out_dir / "viz_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
