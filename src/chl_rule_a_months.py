@@ -19,13 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .chl_shallow_pipeline import (
-    TARGET_COL,
-    daily_table,
-    load_trimmed_chl_frames,
-    monthly_from_daily,
-    PipelineConfig,
-)
+from .chl_shallow_pipeline import load_trimmed_chl_frames
 
 
 def _days_in_month(year: int, month: int) -> int:
@@ -36,7 +30,7 @@ def audit_rule_a(ts: pd.DataFrame, *, p: float = 0.8) -> pd.DataFrame:
     """
     For each calendar month overlapping *ts*, report whether Rule A(p) passes.
 
-    *ts*: DataFrame indexed by DateTime with column TARGET_COL.
+    *ts*: DataFrame indexed by DateTime with Chl column (trimmed series).
     """
     if not (0 < p <= 1.0):
         raise ValueError("p must be in (0, 1].")
@@ -93,29 +87,8 @@ def filter_to_rule_a_months(ts: pd.DataFrame, audit: pd.DataFrame) -> pd.DataFra
     good = set(zip(audit.loc[audit["rule_a_pass"], "year"], audit.loc[audit["rule_a_pass"], "month"]))
     if not good:
         return ts.iloc[0:0]
-    ym = pd.Series(ts.index.year * 100 + ts.index.month, index=ts.index)
     ok = ts.index.map(lambda t: (t.year, t.month) in good)
     return ts.loc[ok]
-
-
-def monthly_ground_truth_rule_a(ts: pd.DataFrame, audit: pd.DataFrame) -> pd.DataFrame:
-    """Two-stage monthly mean (daily mean → monthly mean of dailies) for Rule-A months only."""
-    passed = audit[audit["rule_a_pass"]].copy()
-    if passed.empty:
-        return pd.DataFrame()
-
-    daily = daily_table(ts)
-    cfg = PipelineConfig(
-        data_dir=Path("."),
-        out_dir=Path("."),
-        monthly_method="two_stage",
-        min_samples_per_month=0,
-        min_days_with_data_per_month=0,
-    )
-    monthly_all = monthly_from_daily(daily, cfg)
-    keep = set(passed["year_month"].tolist())
-    monthly_all = monthly_all[monthly_all["year_month"].isin(keep)]
-    return monthly_all
 
 
 def run_rule_a_export(data_dir: Path, out_dir: Path, *, p: float = 0.8) -> None:
@@ -130,11 +103,6 @@ def run_rule_a_export(data_dir: Path, out_dir: Path, *, p: float = 0.8) -> None:
     ts_a = filter_to_rule_a_months(ts, audit)
     ts_a.reset_index().to_csv(out_dir / "chl_shallow_rule_a_timeseries.csv", index=False)
 
-    monthly = monthly_ground_truth_rule_a(ts, audit)
-    if not monthly.empty:
-        monthly.to_csv(out_dir / "chl_shallow_monthly_gt_rule_a.csv")
-
-    # Short summary for thesis / logs
     summary_lines = [
         f"Total calendar months in range: {len(audit)}",
         f"Rule-A(p) eligible months (p={p}): {len(passed)}",
@@ -147,6 +115,5 @@ def run_rule_a_export(data_dir: Path, out_dir: Path, *, p: float = 0.8) -> None:
 __all__ = [
     "audit_rule_a",
     "filter_to_rule_a_months",
-    "monthly_ground_truth_rule_a",
     "run_rule_a_export",
 ]

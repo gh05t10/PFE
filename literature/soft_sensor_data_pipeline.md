@@ -40,7 +40,7 @@ Target: `ChlRFUShallow_RFU`.
 ## `2406.04777v3.pdf` (TDAlign)
 
 - **Plug-in** objective: align **changes between adjacent predicted steps** with **changes in the target** (plus standard LTSF loss).
-- Use as **auxiliary loss** on the **predicted Chl horizon** (or on predicted daily sequence), with **train-only** scaling.
+- Use as **auxiliary loss** on the **predicted Chl horizon** (adjacent steps), with **train-only** scaling.
 
 ## Recommended next preprocessing steps (PFE-specific)
 
@@ -49,7 +49,7 @@ Target: `ChlRFUShallow_RFU`.
    - `y`: `ChlRFUShallow_RFU` **same timestamps**, stored separately.
 2. **Unified grid** (train split): resample to chosen `Δt` (e.g. 10 min or 5 min) with **NaN + mask** (no neighbour mean for **y**).
 3. **Calibration split** (training only): optional tensor `(T, 6)` = concat(X, y) for **teacher / K,V branch** (slide 10).
-4. **Horizon** (≤ 1 month): build **multi-horizon** labels from **daily** series (see `horizon_supervision_daily.csv`) or sub-monthly patch lengths.
+4. **Horizon**: build **windowed** sequences from the unified grid (`run_build_window_dataset.py`): `context_len` + `pred_len` in steps (e.g. 14 days @30 min → 672 steps); masks/weights for missing GT.
 5. **PatchTST**: patch length & stride chosen **after** grid is fixed; **normalize** per-channel using **train** statistics only.
 6. **TDAlign**: add **Δ-step loss** on predicted Chl sequence vs target sequence.
 7. **Evaluation**: time-based split (e.g. 2014–2019 / 2020 / 2021) to respect reservoir seasonality.
