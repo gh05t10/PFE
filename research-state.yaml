@@ -1,0 +1,53 @@
+project:
+  title: "PFE - Shallow Chlorophyll Prediction"
+  question: "How do variations in SlidePatchCrossAttn hyperparameters, specifically patch size, affect validation RMSE for shallow chlorophyll prediction?"
+  status: active
+  started: "2026-04-28"
+  domain: "Time-Series Prediction"
+
+literature:
+  key_papers: []
+  open_problems: []
+  evidence_gaps: []
+
+hypotheses:
+  - id: H1
+    statement: "Reducing the patch_len from 16 to 8 will better capture high-frequency patterns and improve validation RMSE for SlidePatchCrossAttn."
+    status: refuted
+    motivation: "Smaller patch resolutions increase temporal granularity which might be necessary for capturing subtle variations in chlorophyll data."
+    parent: null
+    priority: high
+
+experiments:
+  proxy_metric: "Validation RMSE (val_rmse_chl)"
+  baseline_value: 1.9415
+  best_value: 1.9415
+  total_runs: 2
+  trajectory:
+    - run_id: "H1_base"
+      hypothesis: "Baseline"
+      metric_value: 1.9415
+      delta: 0.0
+      wall_time_min: 1
+      change_summary: "Baseline patch-len=16"
+      timestamp: "2026-04-28"
+    - run_id: "H1_exp"
+      hypothesis: "H1"
+      metric_value: 1.9440
+      delta: 0.0025
+      wall_time_min: 1
+      change_summary: "patch-len=8"
+      timestamp: "2026-04-28"
+
+outer_loop:
+  cycle: 0
+  last_direction: null
+  last_reflection: ""
+
+workspace:
+  findings: "findings.md"
+  log: "research-log.md"
+  literature_dir: "literature/"
+  experiments_dir: "experiments/"
+  to_human_dir: "to_human/"
+  paper_dir: "paper/"

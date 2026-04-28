@@ -1,0 +1,9 @@
+{
+  "best_epoch": 1,
+  "val_rmse_chl": 1.9415318965911865,
+  "val_mae_chl": 1.3720706701278687,
+  "test_rmse_chl": 1.8881282806396484,
+  "test_mae_chl": 1.7254022359848022,
+  "checkpoint": "/home/peter/PFE/experiments/H1/results_base/best_slide.pt",
+  "stopped_reason": "early_stopping_8"
+}
